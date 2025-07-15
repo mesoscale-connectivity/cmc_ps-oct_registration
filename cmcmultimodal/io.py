@@ -1,9 +1,10 @@
-from fsl.data.image import Image
-from scipy.io import loadmat
+import os
 import numpy as np
 from pathlib import Path
+from fsl.data.image import Image
+from scipy.io import loadmat
 
-def mat2nii(mat_file, nii_file, nii_lowres_file = None, downsample = 0):
+def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     '''Convert and store a PSOCT .mat file to a NIFTI image.
     Optionally also create a low-resolution version.
     '''
@@ -24,12 +25,21 @@ def mat2nii(mat_file, nii_file, nii_lowres_file = None, downsample = 0):
 
     # deal with nans
     X = np.nan_to_num(X)
-
-    Image(X).save(nii_file)
+    # save high-res NIFTI
+    if nii_file is None:
+        nii_file = mat_file.replace('.mat', '.nii.gz')
+    save_nifti(X, nii_file)
 
     # Also output low res
     if downsample > 0 and nii_lowres_file is not None:
-        Image(X[::downsample, ::downsample]).save(nii_lowres_file)
+        save_nifti(X[::downsample, ::downsample], nii_lowres_file)
+
+    return Path(nii_file), Path(nii_lowres_file)
+
+def save_nifti(data, filename):
+    out_fd = Path(filename).parent
+    os.makedirs(out_fd, exist_ok=True)
+    Image(data).save(filename)
 
 
 def zeropad(filename, length=3, save=False):
@@ -50,9 +60,9 @@ def zeropad(filename, length=3, save=False):
         raise ValueError(f"Unexpected filename format: {filename}. Expected format: PREFIX_<slice>_SUFFIX.ext")
 
     try:
-        fileparts[-2] = str(int(fileparts[-2])).zfill(length)
+        fileparts[1] = str(int(fileparts[1])).zfill(length)
     except ValueError:
-        raise ValueError(f"Expected numeric slice number, got: {fileparts[-2]} in {filename}")
+        raise ValueError(f"Expected numeric slice number, got: {fileparts[1]} in {filename}")
 
     out_filename = filename.parent / '_'.join(fileparts)
 

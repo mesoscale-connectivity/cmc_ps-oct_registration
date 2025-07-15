@@ -1,3 +1,0 @@
-fslpy
-scipy
-numpy

@@ -90,7 +90,10 @@ class psoct:
             if np.isinf(before) and np.isinf(after):
                 raise ValueError(f"No available slide before or after missing slide {m}")
             # weights for averaging - TODO not in use
-            weights = np.array([m-before, after-m]) / (after-before)
+            if not np.isinf(before) and not np.isinf(after) and before != after:
+                weights = np.array([m-before, after-m]) / (after-before)
+            else:
+                weights = np.array([1.0, 0.0]) if np.abs(m-before) < np.abs(after-m) else np.array([0.0, 1.0])
             # change weights to getting closest
             # weights = np.round(weights)
             # create average image (assumes they are the same shape!)
@@ -98,7 +101,7 @@ class psoct:
             # img_before = Image( self.slides_dict[before] ).data[:,:,0]
             # img_after  = Image( self.slides_dict[after] ).data[:,:,0]
             # Slides_dict[m] = weights[0]*img_before + weights[1]*img_after
-            if np.abs(before-m)<np.abs(after-m):
+            if np.abs(m-before) < np.abs(after-m):
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == before)[0][0]]
             else:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == after)[0][0]]

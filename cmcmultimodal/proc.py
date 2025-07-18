@@ -1,10 +1,7 @@
 
-# from glob import glob
-# import os
 import numpy as np
 from pathlib import Path
-# from cmcmultimodal import io
-# from fsl.data.image import Image
+from cmcmultimodal.utils import get_image, calc_shift
 
 
 class psoct:
@@ -13,14 +10,16 @@ class psoct:
         self.inp_path = Path(inp_path)
         self.image_files = None
         self._slide_range = None
+        self.slide_range = slide_range
         self.slide_numbers = None
         self.missing_slides = []
         self.bad_slides = []
         self.slides_dict = {}
+        self.interpolated_slides = []
 
-        self.__find_all_slides(lowres=lowres)
-        # run the setter after reading all slides
-        self.slide_range = slide_range
+        self._find_all_slides(lowres=lowres)
+        self._find_missing_slides()
+        self._load_slides()
 
     @property
     def slide_range(self):
@@ -38,9 +37,8 @@ class psoct:
         else:
             raise TypeError("slide_range must be a tuple or list of two integers")
         # TODO check if values exceed the min and max slide number and print a warning
-        self._find_missing_slides()
         
-    def __find_all_slides(self, lowres=False):
+    def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
         if lowres:
             # TODO do we need sorted here?
@@ -50,7 +48,7 @@ class psoct:
         # TODO: the specificity of the file format is interlinked with the io.py
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
 
-    def load_slides(self):
+    def _load_slides(self):
         if self.slide_range is not None:
             # TODO optimise the performance by looping through the shortest range
             # i.e. slide_range[1]-slide_range[0] vs slide_numbers[-1]-slide_numbers[0]
@@ -74,7 +72,8 @@ class psoct:
 
     def ignore_slides(self):
         # A list of bad and missing slides
-        return np.sort(np.unique(self.missing_slides+self.bad_slides)).tolist()
+        self.interpolated_slides = np.sort(np.unique(self.missing_slides+self.bad_slides)).tolist()
+        return self.interpolated_slides
 
     def interpolate_missing_slides(self):
         slide_arr = np.array(self.slide_numbers)
@@ -111,7 +110,57 @@ class psoct:
             else:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == after)[0][0]]
 
+    def find_central_slide(self):
+        # Find the size of each slide (excluding the interpolated ones)
+        all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
+        all_sizes = np.zeros(len(all_slides))
+        for slide in range(len(all_slides)):
+            all_sizes[slide] = np.count_nonzero(get_image(self.slides_dict, all_slides[slide]))
+        # Find all slides that have max size and take the median as the central slide
+        max_indices = np.where(all_sizes == np.max(all_sizes))[0]
+        central_slide_num = all_slides[round(np.median(max_indices))]
+        # Get the shape of the central slide
+        central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
+        return central_slide_num, central_slide_shape
+    
+    def align(self, ref='centre', thr=0, verbose = False):
+        '''
+        Parameters:
+        - ref: reference mode for alignment ('centre' for using the central slide)
+        - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
+        '''
+        # This is the main loop that calculates the shifts between each slide
+        # and its neighbour. If it is before central slide, look at neighbour in front
+        # otherwise look at neighbour behind
+        if ref == 'centre':
+            ref_slide, ref_shape = self.find_central_slide()
+        else:
+            raise ValueError(f'Unexpected reference method {ref} for alignment.')
+        # Use all slides for alignment (including interpolated ones)
+        all_slides = np.sort(list(self.slides_dict.keys()))
+        all_shifts = np.zeros((len(all_slides), 2))
+        # for slide in tqdm(all_slides):
+        for slide in range(len(all_slides)):
+        # Get image from dataframe
+            img = get_image(self.slides_dict, all_slides[slide]) 
+            if all_slides[slide] == ref_slide:
+                t = [0, 0] # no shift if it is central slide
+            else:
+                if all_slides[slide] < ref_slide:
+                    tgt = get_image(self.slides_dict, all_slides[slide]+1)
+                else:
+                    tgt = get_image(self.slides_dict, all_slides[slide]-1)
+                t  = calc_shift(img, tgt, ref_shape)
+                # don't worry about small shifts
+                t[0] = t[0] if np.abs(t[0])>thr else 0.
+                t[1] = t[1] if np.abs(t[1])>thr else 0.
+            # Store shifts
+            all_shifts[slide] = t
+            if verbose:
+                print(all_slides[slide], all_shifts[slide])
+
     def run_registration(self, bad_slides=None):
-        self.load_slides()
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
+        self.align(verbose=True)
+

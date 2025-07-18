@@ -4,6 +4,7 @@ from matplotlib import pyplot as plt
 from numpy.fft import fft, ifft, fft2, ifft2, ifftshift
 from scipy.ndimage import shift
 from fsl.data.image import Image
+from pathlib import Path
 
 def cross_correlate_2d(x, h):
     """Calculate cross-correlation between 2D images using Fourier
@@ -62,9 +63,10 @@ def get_image(D, sl):
     """Get image from slide dictionary
     If filename provided, load it, otherwise, return the array
     """
-    if type(D[sl]) == str:
+    if type(D[sl]) == str or isinstance(D[sl], Path):
         return Image(D[sl]).data[:,:,0]
     else:
+        # TODO add if D[sl] in np.array, otherwise raise an error
         return D[sl]
 
 def crop_zeros(X):

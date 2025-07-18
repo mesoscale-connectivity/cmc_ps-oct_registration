@@ -31,6 +31,7 @@ def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     save_nifti(X, nii_file)
 
     # Also output low res
+    # TODO add downsample value in filename
     if downsample > 0 and nii_lowres_file is not None:
         save_nifti(X[::downsample, ::downsample], nii_lowres_file)
 

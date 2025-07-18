@@ -4,7 +4,7 @@
 import numpy as np
 from pathlib import Path
 # from cmcmultimodal import io
-from fsl.data.image import Image
+# from fsl.data.image import Image
 
 
 class psoct:
@@ -13,13 +13,14 @@ class psoct:
         self.inp_path = Path(inp_path)
         self.image_files = None
         self._slide_range = None
-        self.slide_range = slide_range
         self.slide_numbers = None
         self.missing_slides = []
         self.bad_slides = []
         self.slides_dict = {}
 
         self.__find_all_slides(lowres=lowres)
+        # run the setter after reading all slides
+        self.slide_range = slide_range
 
     @property
     def slide_range(self):
@@ -36,6 +37,8 @@ class psoct:
                 raise ValueError("slide_range must be a tuple/list of two integers (start <= end)")
         else:
             raise TypeError("slide_range must be a tuple or list of two integers")
+        # TODO check if values exceed the min and max slide number and print a warning
+        self._find_missing_slides()
         
     def __find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
@@ -56,24 +59,26 @@ class psoct:
                 # slide_range is inclusive
                 if (s>=self.slide_range[0])&(s<=self.slide_range[1]):
                     self.slides_dict[s] = f
+                    # TODO should we add a slides_dict_numbers to keep the indices of the original selection?
         else:
-            # TODO check with Saad
             self.slides_dict = self.image_files
 
-    def find_missing_slides(self):
-        # Get list of missing slides
+    def _find_missing_slides(self):
+        '''Get list of missing slides.'''
         self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
-        self.missing_slides = np.sort(np.unique(self.missing_slides+self.bad_slides)).tolist()
-        return self.missing_slides
 
     def label_bad_slides(self, indices=None):
         ''' List of bad slides as defined by visual assessment.'''
         if indices is not None:
-            self.bad_slides = list(indices)
+            self.bad_slides = [i for i in indices if i>=self.slide_range[0] and i<=self.slide_range[1]]
+
+    def ignore_slides(self):
+        # A list of bad and missing slides
+        return np.sort(np.unique(self.missing_slides+self.bad_slides)).tolist()
 
     def interpolate_missing_slides(self):
         slide_arr = np.array(self.slide_numbers)
-        for m in self.missing_slides:
+        for m in self.ignore_slides():
             # nearest slide before
             before = slide_arr[(slide_arr - m)<0]
             if before.size == 0:
@@ -106,8 +111,7 @@ class psoct:
             else:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == after)[0][0]]
 
-    def run(self, bad_slides=None):
+    def run_registration(self, bad_slides=None):
         self.load_slides()
         self.label_bad_slides(indices=bad_slides)
-        self.find_missing_slides()
         self.interpolate_missing_slides()

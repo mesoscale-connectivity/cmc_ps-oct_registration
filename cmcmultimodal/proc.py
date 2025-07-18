@@ -123,7 +123,7 @@ class psoct:
         central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
         return central_slide_num, central_slide_shape
     
-    def align(self, ref='centre', thr=0, verbose = False):
+    def align(self, ref='centre', thr=0, verbose=False):
         '''
         Parameters:
         - ref: reference mode for alignment ('centre' for using the central slide)
@@ -134,6 +134,12 @@ class psoct:
         # otherwise look at neighbour behind
         if ref == 'centre':
             ref_slide, ref_shape = self.find_central_slide()
+        elif ref == 'first':
+            ref_slide = np.min(list(self.slides_dict.keys()))
+            ref_shape = get_image(self.slides_dict, ref_slide).shape
+        elif ref == 'last':
+            ref_slide = np.max(list(self.slides_dict.keys()))
+            ref_shape = get_image(self.slides_dict, ref_slide).shape
         else:
             raise ValueError(f'Unexpected reference method {ref} for alignment.')
         # Use all slides for alignment (including interpolated ones)

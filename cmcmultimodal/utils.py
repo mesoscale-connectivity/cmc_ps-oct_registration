@@ -68,6 +68,13 @@ def plot_overlay(bckg, fore):
     plt.xticks([])
     plt.yticks([])
 
+def plot_shifts(slides, shifts, format = '-'):
+    plt.figure()
+    plt.plot(slides, shifts, format)
+    plt.xlabel('Slide number (#)')
+    plt.ylabel('Shift [in pixels]')
+    plt.legend(['x-shift', 'y-shift'])
+    plt.show()
 
 def get_image(D, sl):
     """Get image from slide dictionary

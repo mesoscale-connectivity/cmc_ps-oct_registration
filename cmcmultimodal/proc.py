@@ -10,8 +10,7 @@ Copyright (C) 2025 University of Oxford
 
 import numpy as np
 from pathlib import Path
-from matplotlib import pyplot as plt
-from cmcmultimodal.utils import get_image, calc_shift
+from cmcmultimodal.utils import get_image, calc_shift, get_total_shift, plot_shifts
 
 
 class psoct:
@@ -83,14 +82,14 @@ class psoct:
         if indices is not None:
             self.bad_slides = [i for i in indices if i>=self.slide_range[0] and i<=self.slide_range[1]]
 
-    def ignore_slides(self):
+    def _ignore_slides(self):
         # A list of bad and missing slides
         self.interpolated_slides = np.sort(np.unique(self.missing_slides+self.bad_slides)).tolist()
         return self.interpolated_slides
 
     def interpolate_missing_slides(self):
         slide_arr = np.array(self.slide_numbers)
-        for m in self.ignore_slides():
+        for m in self._ignore_slides():
             # nearest slide before
             before = slide_arr[(slide_arr - m)<0]
             if before.size == 0:
@@ -123,7 +122,7 @@ class psoct:
             else:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == after)[0][0]]
 
-    def find_central_slide(self):
+    def _find_central_slide(self):
         # Find the size of each slide (excluding the interpolated ones)
         all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
         all_sizes = np.zeros(len(all_slides))
@@ -136,26 +135,30 @@ class psoct:
         central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
         return central_slide_num, central_slide_shape
     
+    def __get_ref_slide(self, ref):
+        if ref == 'centre':
+            ref_slide, ref_shape = self._find_central_slide()
+        elif ref == 'first':
+            ref_slide = np.min(list(self.slides_dict.keys()))
+            ref_shape = get_image(self.slides_dict, ref_slide).shape
+        elif ref == 'last':
+            ref_slide = np.max(list(self.slides_dict.keys()))
+            ref_shape = get_image(self.slides_dict, ref_slide).shape
+        else:
+            raise ValueError(f'Unexpected reference method {ref} for alignment.')
+        return ref_slide, ref_shape
+
     def align(self, ref='centre', thr=0, verbose=False):
-        '''
+        ''' This method calculates the shifts between each slide and its neighbour.
+        If the slide is before the central slide, it looks at the neighbour in front,
+        otherwise look at the neighbour behind
+
         Parameters:
         - ref: reference mode for alignment ('centre' for using the central slide)
         - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
         '''
-        # This is the main loop that calculates the shifts between each slide
-        # and its neighbour. If it is before central slide, look at neighbour in front
-        # otherwise look at neighbour behind
-        # TODO change these if statements to a function?
-        if ref == 'centre':
-            self.ref_slide, ref_shape = self.find_central_slide()
-        elif ref == 'first':
-            self.ref_slide = np.min(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, self.ref_slide).shape
-        elif ref == 'last':
-            self.ref_slide = np.max(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, self.ref_slide).shape
-        else:
-            raise ValueError(f'Unexpected reference method {ref} for alignment.')
+
+        self.ref_slide, ref_shape = self.__get_ref_slide(ref)
         # Use all slides for alignment (including interpolated ones)
         # TODO change this to a dict to have them paired?
         all_slides = np.sort(list(self.slides_dict.keys()))
@@ -181,13 +184,25 @@ class psoct:
                 print(all_slides[slide], all_shifts[slide])
         return all_slides, all_shifts
 
+    def calc_total_shift(self, ref_slides, rel_shifts):
+        abs_shifts = np.zeros(rel_shifts.shape)
+        for slide in range(len(ref_slides)):
+            abs_shifts[slide] = get_total_shift(rel_shifts, ref_slides[slide], 
+                                                self.ref_slide, 
+                                                first_slide=self.slide_range[0])
+
+        return abs_shifts
+
     def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False, verbose=False):
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        slides, shifts = self.align(ref=align_ref, thr=align_thr, verbose=verbose)
-        # TODO change this into a function
+        slides, rel_shifts = self.align(ref=align_ref, thr=align_thr, verbose=verbose)
         if plot_alignment:
-            plt.figure()
-            plt.plot(slides,shifts,'-o')
-            plt.show()
-        return slides, shifts
+            plot_shifts(slides, rel_shifts, '-o')
+        abs_shifts = self.calc_total_shift(slides, rel_shifts)
+        if plot_alignment:
+            plot_shifts(slides, abs_shifts, '-')
+        return slides, rel_shifts, abs_shifts
+    
+
+

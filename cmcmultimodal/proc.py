@@ -20,7 +20,6 @@ class psoct:
         self.inp_path = Path(inp_path)
         self.image_files = None
         self._slide_range = None
-        self.slide_range = slide_range
         self.slide_numbers = None
         self.missing_slides = []
         self.bad_slides = []
@@ -29,8 +28,8 @@ class psoct:
         self.ref_slide = 0
 
         self._find_all_slides(lowres=lowres)
-        self._find_missing_slides()
-        self._load_slides()
+        # run slide_range setter after finding all the slides
+        self.slide_range = slide_range
 
     @property
     def slide_range(self):
@@ -47,6 +46,9 @@ class psoct:
                 raise ValueError("slide_range must be a tuple/list of two integers (start <= end)")
         else:
             raise TypeError("slide_range must be a tuple or list of two integers")
+        # update missing slides and load slides
+        self._find_missing_slides()
+        self._load_slides()
         # TODO check if values exceed the min and max slide number and print a warning
         
     def _find_all_slides(self, lowres=False):

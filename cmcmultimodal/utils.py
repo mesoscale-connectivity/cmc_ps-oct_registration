@@ -1,3 +1,13 @@
+#!/usr/bin/env python
+'''
+Utility functions for CMC multimodal analysis
+
+Authors: Saad Jbabdi            <saad.jbabdi@ndcn.ox.ac.uk>
+         Vasilis Karlaftis      <vasilis.karlaftis@ndcn.ox.ac.uk>
+
+Copyright (C) 2025 University of Oxford
+'''
+
 # Helper Functions
 import numpy as np
 from matplotlib import pyplot as plt

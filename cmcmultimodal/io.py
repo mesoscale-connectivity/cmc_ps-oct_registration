@@ -1,3 +1,13 @@
+#!/usr/bin/env python
+'''
+Input/output functions for PSOCT data
+
+Authors: Saad Jbabdi            <saad.jbabdi@ndcn.ox.ac.uk>
+         Vasilis Karlaftis      <vasilis.karlaftis@ndcn.ox.ac.uk>
+
+Copyright (C) 2025 University of Oxford
+'''
+
 import os
 import numpy as np
 from pathlib import Path

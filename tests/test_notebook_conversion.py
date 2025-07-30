@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 '''
-Tests methods of PSOCT class in proc.py
+Tests methods return the same result after notebook conversion
 
 Authors: Vasilis Karlaftis    <vasilis.karlaftis@ndcn.ox.ac.uk>
 
@@ -14,11 +14,23 @@ import numpy as np
 
 datadir = Path(__file__).parent / 'testdata'
 
-# Test #1: check align functionality
-def test_align():
-    my_data = psoct(Path(datadir), lowres=True, slide_range=(98,200))
-    slides, shifts = my_data.run_registration(bad_slides=[140,], align_ref='centre', align_thr=0)
+# Test #1: check interpolated_slides match the reference data
+def test_interpolated_slides():
+    data = psoct(Path(datadir), lowres=True, slide_range=(98,200))
+    data.label_bad_slides(indices=[140,])
+    data.interpolate_missing_slides()
+    
+    ref_data = [99, 100, 105, 106, 107, 108, 109, 140]
 
+    assert data.slide_range == (98,200)
+    assert data.interpolated_slides == ref_data
+
+# Test #2: check alignment matches the reference data
+def test_align():
+    data = psoct(Path(datadir), lowres=True, slide_range=(98,200))
+    slides, shifts = data.run_registration(bad_slides=[140,], align_ref='centre', align_thr=0)
+
+    central_slide = 190 
     ref_data = {
         98: np.array([0.0, 0.0]),
         99: np.array([0.0, 0.0]),
@@ -125,5 +137,6 @@ def test_align():
         200: np.array([np.float64(3.0), np.float64(-5.0)]),
     }
 
+    assert data.ref_slide == central_slide
     assert np.array_equal(slides, np.array(list(ref_data.keys())))
     assert np.allclose(shifts, np.array(list(ref_data.values())), atol=0.5)

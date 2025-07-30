@@ -10,7 +10,10 @@ Copyright (C) 2025 University of Oxford
 
 import numpy as np
 from pathlib import Path
-from cmcmultimodal.utils import get_image, calc_shift, get_total_shift, plot_shifts
+from cmcmultimodal.utils import get_image, calc_shift, get_total_shift, \
+                                plot_shifts, pad_image
+from scipy.ndimage import shift
+from fsl.data.image import Image
 
 
 class psoct:
@@ -135,7 +138,7 @@ class psoct:
         central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
         return central_slide_num, central_slide_shape
     
-    def __get_ref_slide(self, ref):
+    def _get_ref_slide(self, ref):
         if ref == 'centre':
             ref_slide, ref_shape = self._find_central_slide()
         elif ref == 'first':
@@ -158,7 +161,7 @@ class psoct:
         - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
         '''
 
-        self.ref_slide, ref_shape = self.__get_ref_slide(ref)
+        self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
         # Use all slides for alignment (including interpolated ones)
         # TODO change this to a dict to have them paired?
         all_slides = np.sort(list(self.slides_dict.keys()))
@@ -174,7 +177,7 @@ class psoct:
                     tgt = get_image(self.slides_dict, all_slides[slide]+1)
                 else:
                     tgt = get_image(self.slides_dict, all_slides[slide]-1)
-                t  = calc_shift(img, tgt, ref_shape)
+                t  = calc_shift(img, tgt, self.ref_shape)
                 # don't worry about small shifts
                 t[0] = t[0] if np.abs(t[0])>thr else 0.
                 t[1] = t[1] if np.abs(t[1])>thr else 0.
@@ -185,6 +188,7 @@ class psoct:
         return all_slides, all_shifts
 
     def calc_total_shift(self, ref_slides, rel_shifts):
+        # TODO consider changing the outputs to attributes
         abs_shifts = np.zeros(rel_shifts.shape)
         for slide in range(len(ref_slides)):
             abs_shifts[slide] = get_total_shift(rel_shifts, ref_slides[slide], 
@@ -193,6 +197,7 @@ class psoct:
 
         return abs_shifts
 
+    # Function to be called and "automate" the registration steps
     def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False, verbose=False):
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
@@ -205,4 +210,63 @@ class psoct:
         return slides, rel_shifts, abs_shifts
     
 
+    def create_slide_deck(self, ref_slides, shifts, orientation, downsample=1, applyshift=True):
+        slide_deck = []
+        for slide in range(len(shifts)):
+            img_padded = pad_image(get_image(self.slides_dict, ref_slides[slide]), self.ref_shape)
+            if applyshift:
+                img_padded = shift(img_padded, shifts[slide])
+            slide_deck.append(img_padded[::downsample,::downsample])
+        slide_deck = np.stack(slide_deck, axis=2)
+        # Reorient slide deck to make coronal
+        if orientation == 'coronal':
+            slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
+            slide_deck = np.flip(slide_deck, axis=1)
+        # TODO complete the following cases
+        elif orientation == 'axial':
+            return 
+        elif orientation == 'sagittal':
+            return
+        else:
+            raise ValueError
+        return slide_deck
+    
+    def apply_registration(self, slide_deck, output_name=None, downsample=1, verbose=False):
 
+        # TODO add this in a separate function and make it more data-driven
+        # Include pixel dimension in the header
+        orig_pixel      = 0.006
+        lr_pixel        = orig_pixel * 10 # TODO change 10 to downsample from io
+        lr_pixel_down   = lr_pixel * downsample
+        slice_thickness = 0.25
+        voxdim          = [lr_pixel_down, slice_thickness, lr_pixel_down]
+        matrix = np.eye(4)
+        for i in range(3):
+            matrix[i,i] = voxdim[i]
+
+        if verbose:
+            print('Creating slide deck image...', end=' ')
+        slide_deck_img = Image(slide_deck, xform=matrix)
+        if output_name is not None:
+            slide_deck_img.save(output_name)
+        if verbose:
+            print('Done.')
+        return slide_deck_img
+
+    def align_dti_to_psoct(self, slide_deck_img, verbose=False):
+        # Register FA to slide_deck
+        from fsl.wrappers import flirt
+        fa = Image('/vols/Data/sj/CMC/data/Moe/MRI/DTI/reoriented_FA.nii.gz')
+        matfile = '/vols/Data/sj/CMC/dti_to_slides.mat'
+        outfile = '/vols/Data/sj/CMC/fa_to_slides'
+        if verbose:
+            print('Running flirt...', end=' ')
+        flirt(src=fa, ref=slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
+        if verbose:
+            print('Done.')
+
+    def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_name, downsample = 1):
+        slide_deck = self.create_slide_deck(slides, abs_shifts, orientation, downsample, applyshift=True)
+        slide_deck_img = self.apply_registration(slide_deck, output_name, downsample)
+        # self.align_dti_to_psoct(slide_deck_img)
+    

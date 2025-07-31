@@ -8,6 +8,7 @@ Authors: Saad Jbabdi            <saad.jbabdi@ndcn.ox.ac.uk>
 Copyright (C) 2025 University of Oxford
 '''
 
+import os
 import numpy as np
 from pathlib import Path
 from cmcmultimodal.utils import get_image, calc_shift, get_total_shift, \
@@ -246,6 +247,7 @@ class psoct:
 
         if verbose:
             print('Creating slide deck image...', end=' ')
+        # TODO consider using io.save_nifti instead
         slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
             slide_deck_img.save(output_name)
@@ -253,20 +255,23 @@ class psoct:
             print('Done.')
         return slide_deck_img
 
-    def align_dti_to_psoct(self, slide_deck_img, verbose=False):
-        # Register FA to slide_deck
+    def align_dti_to_psoct(self, slide_deck_img, output_path, dti_ref, verbose=False):
+        # Register DTI to slide_deck
         from fsl.wrappers import flirt
-        fa = Image('/vols/Data/sj/CMC/data/Moe/MRI/DTI/reoriented_FA.nii.gz')
-        matfile = '/vols/Data/sj/CMC/dti_to_slides.mat'
-        outfile = '/vols/Data/sj/CMC/fa_to_slides'
+        dti_img = Image(dti_ref)
+        matfile = Path(output_path) / 'dti_to_slides.mat'
+        outfile = Path(output_path) / 'fa_to_slides'
         if verbose:
             print('Running flirt...', end=' ')
-        flirt(src=fa, ref=slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
+        flirt(src=dti_img, ref=slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
         if verbose:
             print('Done.')
+        return matfile, outfile
 
-    def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_name, downsample = 1):
+    def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_path, dti_ref, downsample = 1):
+        output_path = Path(output_path)
+        os.makedirs(output_path, exist_ok=True)
         slide_deck = self.create_slide_deck(slides, abs_shifts, orientation, downsample, applyshift=True)
-        slide_deck_img = self.apply_registration(slide_deck, output_name, downsample)
-        # self.align_dti_to_psoct(slide_deck_img)
+        slide_deck_img = self.apply_registration(slide_deck, output_path / 'slide_deck', downsample)
+        matfile, outfile = self.align_dti_to_psoct(slide_deck_img, output_path, dti_ref)
     

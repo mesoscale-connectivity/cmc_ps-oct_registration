@@ -48,6 +48,7 @@ def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     return Path(nii_file), Path(nii_lowres_file)
 
 def save_nifti(data, filename):
+    # TODO pass args from function to Image
     out_fd = Path(filename).parent
     os.makedirs(out_fd, exist_ok=True)
     Image(data).save(filename)

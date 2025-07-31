@@ -8,27 +8,50 @@ Authors: Vasilis Karlaftis    <vasilis.karlaftis@ndcn.ox.ac.uk>
 Copyright (C) 2025 University of Oxford
 '''
 
-from cmcmultimodal.proc import psoct
 from pathlib import Path
 import numpy as np
+import pytest
 
-datadir = Path(__file__).parent / 'testdata'
+from fsl.data.image     import Image
+from cmcmultimodal.proc import psoct
+
+datadir      = Path(__file__).parent / 'testdata'
+benchmarkdir = Path(__file__).parent / 'benchmark'
+
+# Run PSOCT analysis main steps as chained fixtures
+# to avoid repeating the analysis steps
+@pytest.fixture(scope="module")
+def step1_createClass():
+    data_class = psoct(Path(datadir), lowres=True, slide_range=(98,200))
+    return data_class
+
+@pytest.fixture(scope="module")
+def step2_runRegistration(step1_createClass):
+    data_class = step1_createClass
+    slides, rel_shifts, abs_shifts = data_class.run_registration(bad_slides=[140,], align_ref='centre', align_thr=0)
+    return data_class, slides, rel_shifts, abs_shifts
+
+@pytest.fixture(scope="module")
+def step3_applyRegistration(step2_runRegistration):
+    data_class, slides, _, abs_shifts = step2_runRegistration
+    slide_deck = data_class.create_slide_deck(slides, abs_shifts, 'coronal', 1, applyshift=True)
+    slide_deck_img = data_class.apply_registration(slide_deck, None, 1)
+    return data_class, slide_deck_img
 
 # Test #1: check interpolated_slides match the reference data
-def test_interpolated_slides():
-    data = psoct(Path(datadir), lowres=True, slide_range=(98,200))
-    data.label_bad_slides(indices=[140,])
-    data.interpolate_missing_slides()
+def test_interpolated_slides(step1_createClass):
+    data_class = step1_createClass
+    data_class.label_bad_slides(indices=[140,])
+    data_class.interpolate_missing_slides()
     
     ref_data = [99, 100, 105, 106, 107, 108, 109, 140]
 
-    assert data.slide_range == (98,200)
-    assert data.interpolated_slides == ref_data
+    assert data_class.slide_range == (98,200)
+    assert data_class.interpolated_slides == ref_data
 
 # Test #2: check alignment matches the reference data
-def test_align():
-    data = psoct(Path(datadir), lowres=True, slide_range=(98,200))
-    slides, shifts = data.run_registration(bad_slides=[140,], align_ref='centre', align_thr=0)
+def test_align(step2_runRegistration):
+    data_class, slides, rel_shifts, _ = step2_runRegistration
 
     central_slide = 190 
     ref_data = {
@@ -137,6 +160,33 @@ def test_align():
         200: np.array([np.float64(3.0), np.float64(-5.0)]),
     }
 
-    assert data.ref_slide == central_slide
+    assert data_class.ref_slide == central_slide
     assert np.array_equal(slides, np.array(list(ref_data.keys())))
-    assert np.allclose(shifts, np.array(list(ref_data.values())), atol=0.5)
+    assert np.allclose(rel_shifts, np.array(list(ref_data.values())), atol=0.5)
+
+# Test #3: check slide_deck image matches the reference data
+def test_apply_registration(step3_applyRegistration):
+    _, est_data_img = step3_applyRegistration
+
+    ref_data_file = benchmarkdir / 'slide_deck'
+    ref_data = Image(ref_data_file).data
+    est_data = est_data_img.data
+
+    assert np.allclose(ref_data, est_data)
+
+# Test #4: check DTI2PSOCT alignment matches the reference data
+def test_align_dti_to_psoct(step3_applyRegistration, tmp_path):
+    data_class, est_data_img = step3_applyRegistration
+    dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
+    est_mat_file, est_data_file = data_class.align_dti_to_psoct(est_data_img, tmp_path, dti_ref)
+
+    ref_data_file = benchmarkdir / 'fa_to_slides'
+    ref_data = Image(ref_data_file).data
+    ref_mat_file = benchmarkdir / 'dti_to_slides.mat'
+    ref_mat = np.loadtxt(ref_mat_file)
+
+    est_data = Image(est_data_file).data
+    est_mat = np.loadtxt(est_mat_file)
+
+    assert np.allclose(ref_data, est_data)
+    assert np.allclose(ref_mat, est_mat, atol=0.001)

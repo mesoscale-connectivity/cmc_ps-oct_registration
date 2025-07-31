@@ -29,6 +29,7 @@ class psoct:
         self.slides_dict = {}
         self.interpolated_slides = []
         self.ref_slide = 0
+        self.slide_deck_img = None
 
         self._find_all_slides(lowres=lowres)
         # run slide_range setter after finding all the slides
@@ -69,10 +70,10 @@ class psoct:
             # TODO optimise the performance by looping through the shortest range
             # i.e. slide_range[1]-slide_range[0] vs slide_numbers[-1]-slide_numbers[0]
             # slides_dict contains file names, not data
-            for s, f in zip(self.slide_numbers, self.image_files):
+            for sl, f in zip(self.slide_numbers, self.image_files):
                 # slide_range is inclusive
-                if (s>=self.slide_range[0])&(s<=self.slide_range[1]):
-                    self.slides_dict[s] = f
+                if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
+                    self.slides_dict[sl] = f
                     # TODO should we add a slides_dict_numbers to keep the indices of the original selection?
         else:
             self.slides_dict = self.image_files
@@ -84,7 +85,7 @@ class psoct:
     def label_bad_slides(self, indices=None):
         ''' List of bad slides as defined by visual assessment.'''
         if indices is not None:
-            self.bad_slides = [i for i in indices if i>=self.slide_range[0] and i<=self.slide_range[1]]
+            self.bad_slides = [sl for sl in indices if sl>=self.slide_range[0] and sl<=self.slide_range[1]]
 
     def _ignore_slides(self):
         # A list of bad and missing slides
@@ -165,58 +166,58 @@ class psoct:
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
         # Use all slides for alignment (including interpolated ones)
         # TODO change this to a dict to have them paired?
-        all_slides = np.sort(list(self.slides_dict.keys()))
-        all_shifts = np.zeros((len(all_slides), 2))
-        # for slide in tqdm(all_slides):
-        for slide in range(len(all_slides)):
+        slides = np.sort(list(self.slides_dict.keys()))
+        rel_shifts = np.zeros((len(slides), 2))
+        # TODO for interpolated_slides the alignment could be skipped
+        for sl in range(len(slides)):
         # Get image from dataframe
-            img = get_image(self.slides_dict, all_slides[slide]) 
-            if all_slides[slide] == self.ref_slide:
+            img = get_image(self.slides_dict, slides[sl]) 
+            if slides[sl] == self.ref_slide:
                 t = [0, 0] # no shift if it is central slide
             else:
-                if all_slides[slide] < self.ref_slide:
-                    tgt = get_image(self.slides_dict, all_slides[slide]+1)
+                if slides[sl] < self.ref_slide:
+                    tgt = get_image(self.slides_dict, slides[sl]+1)
                 else:
-                    tgt = get_image(self.slides_dict, all_slides[slide]-1)
+                    tgt = get_image(self.slides_dict, slides[sl]-1)
                 t  = calc_shift(img, tgt, self.ref_shape)
                 # don't worry about small shifts
                 t[0] = t[0] if np.abs(t[0])>thr else 0.
                 t[1] = t[1] if np.abs(t[1])>thr else 0.
             # Store shifts
-            all_shifts[slide] = t
+            rel_shifts[sl] = t
             if verbose:
-                print(all_slides[slide], all_shifts[slide])
-        return all_slides, all_shifts
+                print(slides[sl], rel_shifts[sl])
+        # Calculate absolute shifts
+        abs_shifts = self._calc_total_shift(slides, rel_shifts)
 
-    def calc_total_shift(self, ref_slides, rel_shifts):
+        return slides, rel_shifts, abs_shifts
+
+    def _calc_total_shift(self, slides, rel_shifts):
         # TODO consider changing the outputs to attributes
         abs_shifts = np.zeros(rel_shifts.shape)
-        for slide in range(len(ref_slides)):
-            abs_shifts[slide] = get_total_shift(rel_shifts, ref_slides[slide], 
+        for sl in range(len(slides)):
+            abs_shifts[sl] = get_total_shift(rel_shifts, slides[sl], 
                                                 self.ref_slide, 
                                                 first_slide=self.slide_range[0])
-
         return abs_shifts
 
     # Function to be called and "automate" the registration steps
     def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False, verbose=False):
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        slides, rel_shifts = self.align(ref=align_ref, thr=align_thr, verbose=verbose)
+        slides, rel_shifts, abs_shifts = self.align(ref=align_ref, thr=align_thr, verbose=verbose)
         if plot_alignment:
             plot_shifts(slides, rel_shifts, '-o')
-        abs_shifts = self.calc_total_shift(slides, rel_shifts)
-        if plot_alignment:
             plot_shifts(slides, abs_shifts, '-')
         return slides, rel_shifts, abs_shifts
     
 
-    def create_slide_deck(self, ref_slides, shifts, orientation, downsample=1, applyshift=True):
+    def create_slide_deck(self, slides, shifts, orientation, downsample=1, applyshift=True):
         slide_deck = []
-        for slide in range(len(shifts)):
-            img_padded = pad_image(get_image(self.slides_dict, ref_slides[slide]), self.ref_shape)
+        for sl in range(len(slides)):
+            img_padded = pad_image(get_image(self.slides_dict, slides[sl]), self.ref_shape)
             if applyshift:
-                img_padded = shift(img_padded, shifts[slide])
+                img_padded = shift(img_padded, shifts[sl])
             slide_deck.append(img_padded[::downsample,::downsample])
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
@@ -248,30 +249,67 @@ class psoct:
         if verbose:
             print('Creating slide deck image...', end=' ')
         # TODO consider using io.save_nifti instead
-        slide_deck_img = Image(slide_deck, xform=matrix)
+        self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
-            slide_deck_img.save(output_name)
+            self.slide_deck_img.save(output_name)
         if verbose:
             print('Done.')
-        return slide_deck_img
 
-    def align_dti_to_psoct(self, slide_deck_img, output_path, dti_ref, verbose=False):
+    # TODO add fnirt option
+    def align_dti_to_psoct(self, output_path, dti_ref, verbose=False):
         # Register DTI to slide_deck
         from fsl.wrappers import flirt
         dti_img = Image(dti_ref)
+        # TODO discuss default naming conventions
         matfile = Path(output_path) / 'dti_to_slides.mat'
         outfile = Path(output_path) / 'fa_to_slides'
         if verbose:
             print('Running flirt...', end=' ')
-        flirt(src=dti_img, ref=slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
+        flirt(src=dti_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
         if verbose:
             print('Done.')
         return matfile, outfile
+    
+    def align_psoct_to_dti(self, matfile, output_path, dti_ref):
+        from fsl.transform.flirt import flirtMatrixToSform
+        mat     = np.loadtxt(matfile)
+        mat_inv = np.linalg.inv(mat)
+        outfile  = Path(output_path) / 'slide_deck_to_dti'
+
+        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(dti_ref))
+        slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
+        slide_img_hdr.save(outfile)
+        return outfile
 
     def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_path, dti_ref, downsample = 1):
         output_path = Path(output_path)
         os.makedirs(output_path, exist_ok=True)
         slide_deck = self.create_slide_deck(slides, abs_shifts, orientation, downsample, applyshift=True)
-        slide_deck_img = self.apply_registration(slide_deck, output_path / 'slide_deck', downsample)
-        matfile, outfile = self.align_dti_to_psoct(slide_deck_img, output_path, dti_ref)
-    
+        self.apply_registration(slide_deck, output_path / 'slide_deck', downsample)
+        matfile, _ = self.align_dti_to_psoct(output_path, dti_ref)
+        _ = self.align_psoct_to_dti(matfile, output_path, dti_ref)
+
+    # def update_headers(self):
+    #     # Add header information to single slides
+    #     # This will be useful for visualising high resolution slides on top of the MRI
+
+    #     # First split the slide deck to get individual sides "correct" header
+    #     from fsl.wrappers.avwutils import fslsplit
+    #     from fsl.wrappers import LOAD
+
+    #     indiv_slides = fslsplit(src=slide_img_hdr, out=LOAD, dim='y')
+    #     # add header to indiv slides
+    #     first = slide_range[0]
+    #     last  = slide_range[1]
+
+    #     # Careful here: slides are now going in the opposite direction
+    #     # I.e. idx:0->N-1 and sl:last->first
+    #     # TODO: why are these run in the opposite direction?
+    #     lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
+
+    #     for sl in lookup:
+    #         idx = lookup[sl]
+    #         print(idx, sl)
+    #         img = indiv_slides[f'out{str(idx).zfill(4)}']
+    #         filename = f'/vols/Data/sj/CMC/data/Moe/PSOCT/Retardance/lowres/Slide_{str(sl).zfill(3)}_hdr'
+    #         Image(img.data, header=img.header).save(filename)

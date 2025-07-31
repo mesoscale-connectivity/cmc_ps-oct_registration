@@ -35,8 +35,25 @@ def step2_runRegistration(step1_createClass):
 def step3_applyRegistration(step2_runRegistration):
     data_class, slides, _, abs_shifts = step2_runRegistration
     slide_deck = data_class.create_slide_deck(slides, abs_shifts, 'coronal', 1, applyshift=True)
-    slide_deck_img = data_class.apply_registration(slide_deck, None, 1)
-    return data_class, slide_deck_img
+    data_class.apply_registration(slide_deck, None, 1)
+    return data_class
+
+@pytest.fixture(scope="module")
+def step4_alignDTI2PSOCT(step3_applyRegistration, tmp_path_factory):
+    data_class = step3_applyRegistration
+    tmpdir = tmp_path_factory.mktemp("align_dti2psoct")
+    dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
+    mat_file, data_file = data_class.align_dti_to_psoct(tmpdir, dti_ref)
+    return data_class, mat_file, data_file
+
+@pytest.fixture(scope="module")
+def step5_alignPSOCT2DTI(step4_alignDTI2PSOCT, tmp_path_factory):
+    data_class, mat_file, _ = step4_alignDTI2PSOCT
+    tmpdir = tmp_path_factory.mktemp("align_psoct2dti")
+    dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
+    data_file = data_class.align_psoct_to_dti(mat_file, tmpdir, dti_ref)
+    return data_file
+
 
 # Test #1: check interpolated_slides match the reference data
 def test_interpolated_slides(step1_createClass):
@@ -166,19 +183,17 @@ def test_align(step2_runRegistration):
 
 # Test #3: check slide_deck image matches the reference data
 def test_apply_registration(step3_applyRegistration):
-    _, est_data_img = step3_applyRegistration
+    data_class = step3_applyRegistration
 
     ref_data_file = benchmarkdir / 'slide_deck'
     ref_data = Image(ref_data_file).data
-    est_data = est_data_img.data
+    est_data = data_class.slide_deck_img.data
 
     assert np.allclose(ref_data, est_data)
 
 # Test #4: check DTI2PSOCT alignment matches the reference data
-def test_align_dti_to_psoct(step3_applyRegistration, tmp_path):
-    data_class, est_data_img = step3_applyRegistration
-    dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
-    est_mat_file, est_data_file = data_class.align_dti_to_psoct(est_data_img, tmp_path, dti_ref)
+def test_align_dti_to_psoct(step4_alignDTI2PSOCT):
+    _, est_mat_file, est_data_file = step4_alignDTI2PSOCT
 
     ref_data_file = benchmarkdir / 'fa_to_slides'
     ref_data = Image(ref_data_file).data
@@ -188,5 +203,15 @@ def test_align_dti_to_psoct(step3_applyRegistration, tmp_path):
     est_data = Image(est_data_file).data
     est_mat = np.loadtxt(est_mat_file)
 
-    assert np.allclose(ref_data, est_data)
     assert np.allclose(ref_mat, est_mat, atol=0.001)
+    assert np.allclose(ref_data, est_data)
+
+# Test #5: check PSOCT2DTI alignment matches the reference data
+def test_align_psoct_to_dti(step5_alignPSOCT2DTI):
+    est_data_file = step5_alignPSOCT2DTI
+
+    ref_data_file = benchmarkdir / 'slide_deck_with_header'
+    ref_data = Image(ref_data_file).data
+    est_data = Image(est_data_file).data
+
+    assert np.allclose(ref_data, est_data)

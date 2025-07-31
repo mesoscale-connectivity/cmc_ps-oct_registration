@@ -30,6 +30,7 @@ class psoct:
         self.interpolated_slides = []
         self.ref_slide = 0
         self.slide_deck_img = None
+        self.output_path = None
 
         self._find_all_slides(lowres=lowres)
         # run slide_range setter after finding all the slides
@@ -212,6 +213,7 @@ class psoct:
         return slides, rel_shifts, abs_shifts
     
 
+    # TODO consider moving this to the run_registration function
     def create_slide_deck(self, slides, shifts, orientation, downsample=1, applyshift=True):
         slide_deck = []
         for sl in range(len(slides)):
@@ -251,18 +253,19 @@ class psoct:
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
-            self.slide_deck_img.save(output_name)
+            self.slide_deck_img.save(self.output_path / output_name)
         if verbose:
             print('Done.')
 
     # TODO add fnirt option
-    def align_dti_to_psoct(self, output_path, dti_ref, verbose=False):
+    def align_dti_to_psoct(self, dti_ref, verbose=False):
         # Register DTI to slide_deck
         from fsl.wrappers import flirt
+        # TODO does this need to be an image or could it be a filename?
         dti_img = Image(dti_ref)
         # TODO discuss default naming conventions
-        matfile = Path(output_path) / 'dti_to_slides.mat'
-        outfile = Path(output_path) / 'fa_to_slides'
+        matfile = self.output_path / 'dti_to_slides.mat'
+        outfile = self.output_path / 'fa_to_slides'
         if verbose:
             print('Running flirt...', end=' ')
         flirt(src=dti_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
@@ -270,46 +273,93 @@ class psoct:
             print('Done.')
         return matfile, outfile
     
-    def align_psoct_to_dti(self, matfile, output_path, dti_ref):
+    def align_psoct_to_dti(self, matfile, dti_ref):
         from fsl.transform.flirt import flirtMatrixToSform
         mat     = np.loadtxt(matfile)
+        # TODO should we store the inverted mat?
         mat_inv = np.linalg.inv(mat)
-        outfile  = Path(output_path) / 'slide_deck_to_dti'
+        outfile = self.output_path / 'slide_deck_to_dti'
 
         xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(dti_ref))
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
         return outfile
 
+    def update_nifti_headers(self, slide_deck, orientation):
+        # Add header information to single slides
+        # This will be useful for visualising high resolution slides on top of the MRI
+
+        # First split the slide deck to get individual sides "correct" header
+        from fsl.wrappers.avwutils import fslsplit
+        from fsl.wrappers import LOAD
+        # TODO add other cases
+        if orientation == 'coronal':
+            indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim='y')
+
+        # Careful here: slides are now going in the opposite direction
+        # I.e. idx:0->N-1 and sl:last->first
+        # TODO: why are these run in the opposite direction?
+        # first, last = self.slide_range
+        # lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
+        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
+        split_numbers = sorted(list(indiv_slides.keys()))
+
+        for sl, idx in zip(slide_numbers, split_numbers):#lookup:
+            # idx = lookup[sl]
+            # print(idx, sl)
+            img = indiv_slides[idx]#[f'out{str(idx).zfill(4)}']
+            # Get the relative path
+            rel_path = self.slides_dict[sl].relative_to(self.inp_path)
+            filename = self.output_path / str(rel_path.name).replace('.nii.gz', '_hdr.nii.gz')
+            os.makedirs(filename.parent, exist_ok=True)
+            Image(img.get_fdata(), header=img.header).save(filename)
+    
     def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_path, dti_ref, downsample = 1):
-        output_path = Path(output_path)
-        os.makedirs(output_path, exist_ok=True)
+        self.output_path = Path(output_path)
+        os.makedirs(self.output_path, exist_ok=True)
         slide_deck = self.create_slide_deck(slides, abs_shifts, orientation, downsample, applyshift=True)
-        self.apply_registration(slide_deck, output_path / 'slide_deck', downsample)
-        matfile, _ = self.align_dti_to_psoct(output_path, dti_ref)
-        _ = self.align_psoct_to_dti(matfile, output_path, dti_ref)
+        self.apply_registration(slide_deck, 'slide_deck', downsample)
+        matfile, _ = self.align_dti_to_psoct(dti_ref)
+        psoct_in_dti_file = self.align_psoct_to_dti(matfile, dti_ref)
+        self.update_nifti_headers(psoct_in_dti_file, orientation)
+        return psoct_in_dti_file
 
-    # def update_headers(self):
-    #     # Add header information to single slides
-    #     # This will be useful for visualising high resolution slides on top of the MRI
 
-    #     # First split the slide deck to get individual sides "correct" header
-    #     from fsl.wrappers.avwutils import fslsplit
-    #     from fsl.wrappers import LOAD
+    # def apply_to_highres(self):
+    #     # Now apply this header to the high res images
+    #     # Note: they need to be zero-padded first and shifted!!
+    #     import fsl.transform.affine as affine
 
-    #     indiv_slides = fslsplit(src=slide_img_hdr, out=LOAD, dim='y')
-    #     # add header to indiv slides
-    #     first = slide_range[0]
-    #     last  = slide_range[1]
+    #     first, last = self.slide_range
 
     #     # Careful here: slides are now going in the opposite direction
     #     # I.e. idx:0->N-1 and sl:last->first
-    #     # TODO: why are these run in the opposite direction?
     #     lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
 
     #     for sl in lookup:
     #         idx = lookup[sl]
     #         print(idx, sl)
-    #         img = indiv_slides[f'out{str(idx).zfill(4)}']
-    #         filename = f'/vols/Data/sj/CMC/data/Moe/PSOCT/Retardance/lowres/Slide_{str(sl).zfill(3)}_hdr'
-    #         Image(img.data, header=img.header).save(filename)
+    #         img_lr   = indiv_slides[f'out{str(idx).zfill(4)}']
+            
+    #         # Load Image
+    #         rel_path = self.slides_dict[sl].relative_to(self.inp_path)
+    #         # filename = self.output_path / str(rel_path.name).replace('.nii.gz', '_hdr.nii.gz')
+    #         hr_file = f'/vols/Data/sj/CMC/data/Moe/PSOCT/Retardance/Slice_{sl}_EnR'
+    #         if not os.path.exists(hr_file+'.nii.gz'):
+    #             print('File does not exist, skip')
+    #             continue
+    #         img_hr = Image(hr_file).data[:,:,0]
+    #         # Zero-pad and shift
+    #         new_shape    = [x*10 for x in self.ref_shape]
+    #         img_zp       = pad_image(img_hr, new_shape)
+    #         t            = get_total_shift(all_shifts, sl, self.ref_slide, first_slide=self.slide_range[0])
+    #         img_zp_shift = shift(img_zp, [x*10 for x in t])
+
+    #         newShape = [img_lr.shape[0]*10, img_lr.shape[1], img_lr.shape[2]*10]
+    #         newShape = np.array(np.round(newShape), dtype=int)
+
+    #         matrix = affine.rescale(img_lr.shape, newShape, 'centre')
+    #         matrix = affine.concat(img_lr.voxToWorldMat, matrix)
+
+    #         img_hr = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lr.header)
+    #         img_hr.save(hr_file + '_header')

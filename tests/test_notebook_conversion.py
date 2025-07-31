@@ -41,17 +41,19 @@ def step3_applyRegistration(step2_runRegistration):
 @pytest.fixture(scope="module")
 def step4_alignDTI2PSOCT(step3_applyRegistration, tmp_path_factory):
     data_class = step3_applyRegistration
-    tmpdir = tmp_path_factory.mktemp("align_dti2psoct")
+    tmpdir = tmp_path_factory.mktemp("test_results")
+    data_class.output_path = tmpdir
     dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
-    mat_file, data_file = data_class.align_dti_to_psoct(tmpdir, dti_ref)
+    # dti_ref = benchmarkdir / 'dti_FA.nii.gz'
+    mat_file, data_file = data_class.align_dti_to_psoct(dti_ref)
     return data_class, mat_file, data_file
 
 @pytest.fixture(scope="module")
-def step5_alignPSOCT2DTI(step4_alignDTI2PSOCT, tmp_path_factory):
+def step5_alignPSOCT2DTI(step4_alignDTI2PSOCT):
     data_class, mat_file, _ = step4_alignDTI2PSOCT
-    tmpdir = tmp_path_factory.mktemp("align_psoct2dti")
     dti_ref = benchmarkdir / 'reoriented_FA.nii.gz'
-    data_file = data_class.align_psoct_to_dti(mat_file, tmpdir, dti_ref)
+    # dti_ref = benchmarkdir / 'dti_FA.nii.gz'
+    data_file = data_class.align_psoct_to_dti(mat_file, dti_ref)
     return data_file
 
 

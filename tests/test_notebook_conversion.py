@@ -15,8 +15,7 @@ import pytest
 from fsl.data.image     import Image
 from cmcmultimodal.proc import psoct
 
-datadir      = Path(__file__).parent / 'testdata'
-benchmarkdir = Path(__file__).parent / 'benchmark'
+datadir = Path(__file__).parent / 'benchmark'
 
 # Run PSOCT analysis main steps as chained fixtures
 # to avoid repeating the analysis steps
@@ -35,25 +34,32 @@ def step2_runRegistration(step1_createClass):
 def step3_applyRegistration(step2_runRegistration):
     data_class, slides, _, abs_shifts = step2_runRegistration
     data_class.apply_registration(slides, abs_shifts, 'coronal', None, 1)
-    return data_class
+    return data_class, abs_shifts
 
 @pytest.fixture(scope="module")
 def step4_alignMRI2PSOCT(step3_applyRegistration, tmp_path_factory):
-    data_class = step3_applyRegistration
+    data_class, abs_shifts = step3_applyRegistration
     tmpdir = tmp_path_factory.mktemp("test_results")
     data_class.output_path = tmpdir
-    mri_ref = benchmarkdir / 'reoriented_FA.nii.gz'
-    # mri_ref = benchmarkdir / 'dti_FA.nii.gz'
+    mri_ref = datadir / 'reoriented_FA.nii.gz'
+    # mri_ref = datadir / 'dti_FA.nii.gz'
     mat_file, data_file = data_class.align_mri_to_psoct(mri_ref)
-    return data_class, mat_file, data_file
+    return data_class, mat_file, data_file, abs_shifts
 
 @pytest.fixture(scope="module")
 def step5_alignPSOCT2MRI(step4_alignMRI2PSOCT):
-    data_class, mat_file, _ = step4_alignMRI2PSOCT
-    mri_ref = benchmarkdir / 'reoriented_FA.nii.gz'
-    # mri_ref = benchmarkdir / 'dti_FA.nii.gz'
+    data_class, mat_file, _, abs_shifts = step4_alignMRI2PSOCT
+    mri_ref = datadir / 'reoriented_FA.nii.gz'
+    # mri_ref = datadir / 'dti_FA.nii.gz'
     data_file = data_class.align_psoct_to_mri(mat_file, mri_ref)
-    return data_file
+    return data_class, data_file, abs_shifts
+
+@pytest.fixture(scope="module")
+def step6_update_headers(step5_alignPSOCT2MRI):
+    data_class, data_file, abs_shifts = step5_alignPSOCT2MRI
+    indiv_slides = data_class.update_nifti_headers(data_file, 'coronal')
+    data_class.apply_to_highres_images(indiv_slides, abs_shifts, 'coronal', 'Retardance')
+    return data_class
 
 
 # Test #1: check interpolated_slides match the reference data
@@ -184,9 +190,9 @@ def test_align(step2_runRegistration):
 
 # Test #3: check slide_deck image matches the reference data
 def test_apply_registration(step3_applyRegistration):
-    data_class = step3_applyRegistration
+    data_class, _ = step3_applyRegistration
 
-    ref_data_file = benchmarkdir / 'slide_deck'
+    ref_data_file = datadir / 'slide_deck'
     ref_data = Image(ref_data_file).data
     est_data = data_class.slide_deck_img.data
 
@@ -194,11 +200,11 @@ def test_apply_registration(step3_applyRegistration):
 
 # Test #4: check MRI2PSOCT alignment matches the reference data
 def test_align_mri_to_psoct(step4_alignMRI2PSOCT):
-    _, est_mat_file, est_data_file = step4_alignMRI2PSOCT
+    _, est_mat_file, est_data_file, _ = step4_alignMRI2PSOCT
 
-    ref_data_file = benchmarkdir / 'fa_to_slides'
+    ref_data_file = datadir / 'fa_to_slides'
     ref_data = Image(ref_data_file).data
-    ref_mat_file = benchmarkdir / 'dti_to_slides.mat'
+    ref_mat_file = datadir / 'dti_to_slides.mat'
     ref_mat = np.loadtxt(ref_mat_file)
 
     est_data = Image(est_data_file).data
@@ -209,10 +215,21 @@ def test_align_mri_to_psoct(step4_alignMRI2PSOCT):
 
 # Test #5: check PSOCT2MRI alignment matches the reference data
 def test_align_psoct_to_mri(step5_alignPSOCT2MRI):
-    est_data_file = step5_alignPSOCT2MRI
+    _, est_data_file, _ = step5_alignPSOCT2MRI
 
-    ref_data_file = benchmarkdir / 'slide_deck_with_header'
+    ref_data_file = datadir / 'slide_deck_with_header'
     ref_data = Image(ref_data_file).data
     est_data = Image(est_data_file).data
 
     assert np.allclose(ref_data, est_data)
+
+# Test #6: check update_nifti_headers & apply_to_highres_images results match the reference data
+def test_nifti_headers(step6_update_headers):
+    output_path = step6_update_headers.output_path
+    highres_ref = datadir / 'highres_with_header'
+    for file in highres_ref.glob('*.nii.gz'):
+        ref_img = Image(file)
+        est_img_file = output_path / file.name
+        est_img = Image(est_img_file)
+        assert np.allclose(ref_img.data, est_img.data)
+        assert ref_img.header == est_img.header

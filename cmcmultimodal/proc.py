@@ -11,10 +11,16 @@ Copyright (C) 2025 University of Oxford
 import os
 import numpy as np
 from pathlib import Path
-from cmcmultimodal.utils import get_image, calc_shift, get_total_shift, \
-                                plot_shifts, pad_image
-from scipy.ndimage import shift
-from fsl.data.image import Image
+
+from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
+                                   plot_shifts, pad_image
+from scipy.ndimage          import shift
+from fsl.data.image         import Image
+from fsl.wrappers           import flirt
+from fsl.transform.flirt    import flirtMatrixToSform
+from fsl.wrappers.avwutils  import fslsplit
+from fsl.wrappers           import LOAD
+import fsl.transform.affine as affine
 
 
 class psoct:
@@ -22,14 +28,10 @@ class psoct:
     def __init__(self, inp_path, slide_range=None, lowres=True):
         self.inp_path = Path(inp_path)
         self.image_files = None
+        self.slide_res = None
+        self.downsample = 1
         self._slide_range = None
         self.slide_numbers = None
-        self.missing_slides = []
-        self.bad_slides = []
-        self.slides_dict = {}
-        self.interpolated_slides = []
-        self.ref_slide = 0
-        self.slide_deck_img = None
         self.output_path = None
 
         self._find_all_slides(lowres=lowres)
@@ -42,27 +44,51 @@ class psoct:
 
     @slide_range.setter
     def slide_range(self, value):
+        # if the new range is same as current then skip
+        if value == self._slide_range:
+            return
         if value is None:
             self._slide_range = None
         elif isinstance(value, (list, tuple)) and len(value) == 2:
             if all(isinstance(v, int) for v in value) and value[0] <= value[1]:
+                if value[0] < min(self.slide_numbers):
+                    value[0] = min(self.slide_numbers)
+                    print('WARNING: slide_range exceeds minimum slide number! Changing to min...')
+                if value[1] > max(self.slide_numbers):
+                    value[1] = max(self.slide_numbers)
+                    print('WARNING: slide_range exceeds maximum slide number! Changing to max...')
                 self._slide_range = tuple(value)
             else:
                 raise ValueError("slide_range must be a tuple/list of two integers (start <= end)")
         else:
             raise TypeError("slide_range must be a tuple or list of two integers")
+        # reset attributes that are affected by slide_range changes
+        self.__reset_attributes()
         # update missing slides and load slides
         self._find_missing_slides()
         self._load_slides()
-        # TODO check if values exceed the min and max slide number and print a warning
-        
+
+    def __reset_attributes(self):
+        ''' Initialise or reset attributes that depend on selected slide_range
+        '''
+        self.missing_slides = []
+        self.slides_dict = {}
+        self.bad_slides = []
+        self.interpolated_slides = []
+        self.ref_slide = 0
+        self.ref_shape = 0
+        self.slide_deck_img = None
+
     def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
+        # TODO add 'modality' option for data path
         if lowres:
-            # TODO do we need sorted here?
-            self.image_files   = sorted(self.inp_path.glob('lowres/' + 'Slice_*_En*.nii.gz'))
+            self.image_files = sorted(self.inp_path.glob('lowres/' + 'Slice_*_En*.nii.gz'))
+            self.slide_res = 'lowres'
+            self.downsample = 10
         else:
-            self.image_files   = sorted(self.inp_path.glob('Slice_*_En*.nii.gz'))
+            self.image_files = sorted(self.inp_path.glob('Slice_*_En*.nii.gz'))
+            self.slide_res = 'highres'
         # TODO: the specificity of the file format is interlinked with the io.py
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
 
@@ -81,11 +107,12 @@ class psoct:
 
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
-        self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
+        if self.slide_range is not None and self.slide_numbers is not None:
+            self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
 
     def label_bad_slides(self, indices=None):
         ''' List of bad slides as defined by visual assessment.'''
-        if indices is not None:
+        if indices is not None and self.slide_range is not None:
             self.bad_slides = [sl for sl in indices if sl>=self.slide_range[0] and sl<=self.slide_range[1]]
 
     def _ignore_slides(self):
@@ -213,8 +240,7 @@ class psoct:
         return slides, rel_shifts, abs_shifts
     
 
-    # TODO consider moving this to the run_registration function
-    def create_slide_deck(self, slides, shifts, orientation, downsample=1, applyshift=True):
+    def _create_slide_deck(self, slides, shifts, orientation, downsample=1, applyshift=True):
         slide_deck = []
         for sl in range(len(slides)):
             img_padded = pad_image(get_image(self.slides_dict, slides[sl]), self.ref_shape)
@@ -223,6 +249,7 @@ class psoct:
             slide_deck.append(img_padded[::downsample,::downsample])
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
+        # TODO orientation should become an attribute?
         if orientation == 'coronal':
             slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
             slide_deck = np.flip(slide_deck, axis=1)
@@ -235,12 +262,11 @@ class psoct:
             raise ValueError
         return slide_deck
     
-    def apply_registration(self, slide_deck, output_name=None, downsample=1, verbose=False):
-
+    def apply_registration(self, slides, shifts, orientation, output_name=None, downsample=1, verbose=False):
         # TODO add this in a separate function and make it more data-driven
         # Include pixel dimension in the header
         orig_pixel      = 0.006
-        lr_pixel        = orig_pixel * 10 # TODO change 10 to downsample from io
+        lr_pixel        = orig_pixel * self.downsample
         lr_pixel_down   = lr_pixel * downsample
         slice_thickness = 0.25
         voxdim          = [lr_pixel_down, slice_thickness, lr_pixel_down]
@@ -250,6 +276,7 @@ class psoct:
 
         if verbose:
             print('Creating slide deck image...', end=' ')
+        slide_deck = self._create_slide_deck(slides, shifts, orientation, downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
@@ -258,29 +285,27 @@ class psoct:
             print('Done.')
 
     # TODO add fnirt option
-    def align_dti_to_psoct(self, dti_ref, verbose=False):
-        # Register DTI to slide_deck
-        from fsl.wrappers import flirt
+    def align_mri_to_psoct(self, mri_ref, verbose=False):
+        # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
-        dti_img = Image(dti_ref)
+        mri_img = Image(mri_ref)
         # TODO discuss default naming conventions
-        matfile = self.output_path / 'dti_to_slides.mat'
-        outfile = self.output_path / 'fa_to_slides'
+        matfile = self.output_path / 'mri_to_slides.mat'
+        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
         if verbose:
             print('Running flirt...', end=' ')
-        flirt(src=dti_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
+        flirt(src=mri_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
         if verbose:
             print('Done.')
         return matfile, outfile
     
-    def align_psoct_to_dti(self, matfile, dti_ref):
-        from fsl.transform.flirt import flirtMatrixToSform
+    def align_psoct_to_mri(self, matfile, mri_ref):
         mat     = np.loadtxt(matfile)
         # TODO should we store the inverted mat?
         mat_inv = np.linalg.inv(mat)
-        outfile = self.output_path / 'slide_deck_to_dti'
+        outfile = self.output_path / 'slide_deck_to_mri'
 
-        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(dti_ref))
+        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref))
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
         return outfile
@@ -290,12 +315,12 @@ class psoct:
         # This will be useful for visualising high resolution slides on top of the MRI
 
         # First split the slide deck to get individual sides "correct" header
-        from fsl.wrappers.avwutils import fslsplit
-        from fsl.wrappers import LOAD
         # TODO add other cases
         if orientation == 'coronal':
             indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim='y')
-
+        else:
+            raise ValueError("Only 'coronal' orientation is currently supported!")
+        
         # Careful here: slides are now going in the opposite direction
         # I.e. idx:0->N-1 and sl:last->first
         # TODO: why are these run in the opposite direction?
@@ -308,58 +333,76 @@ class psoct:
             # idx = lookup[sl]
             # print(idx, sl)
             img = indiv_slides[idx]#[f'out{str(idx).zfill(4)}']
-            # Get the relative path
+            # Get the relative path and update the slide number for the interpolated slides
             rel_path = self.slides_dict[sl].relative_to(self.inp_path)
-            filename = self.output_path / str(rel_path.name).replace('.nii.gz', '_hdr.nii.gz')
+            fileparts = rel_path.name.split('_')
+            fileparts[1] = str(sl).zfill(3)
+            rel_path = rel_path.parent / '_'.join(fileparts)
+            filename = self.output_path / str(rel_path).replace('.nii.gz', '_hdr.nii.gz')
             os.makedirs(filename.parent, exist_ok=True)
             Image(img.get_fdata(), header=img.header).save(filename)
+            indiv_slides[idx] = filename
+        
+        return indiv_slides
+
+    def apply_to_highres_images(self, indiv_slides, shifts, orientation, modality='Retardance'):
+        # Now apply this header to the high res images
+        # Note: they need to be zero-padded first and shifted!!
+
+        if self.slide_res == 'highres' and modality == 'Retardance':
+            print("Input images are already 'highres'. Skipping this step...")
+            return
+
+        # Careful here: slides are now going in the opposite direction
+        # I.e. idx:0->N-1 and sl:last->first
+        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
+        split_numbers = sorted(list(indiv_slides.keys()))
+        
+        for sl, idx, sft in zip(slide_numbers, split_numbers, shifts):
+            img_lowres = Image(indiv_slides[idx])
+            
+            # TODO make filenaming more robust to differences between lowres and highres folders
+            # Load Image
+            highres_file = self.inp_path / self.slides_dict[sl].name
+            fileparts = highres_file.name.split('_')
+            fileparts[1] = str(sl).zfill(3)
+            highres_file = highres_file.parent / '_'.join(fileparts)
+
+            filename = self.output_path / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
+            if not os.path.exists(highres_file):
+                print(f"File {highres_file.name} does not exist, skip.")
+                continue
+            img_highres = Image(highres_file).data[:,:,0]
+
+            # Zero-pad and shift
+            highres_shape = [x * self.downsample for x in self.ref_shape]
+            img_padded    = pad_image(img_highres, highres_shape)
+            img_zp_shift  = shift(img_padded, sft * self.downsample)
+            
+            # TODO update for other orientations
+            if orientation == 'coronal':
+                newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
+            else:
+                raise ValueError("Only 'coronal' orientation is currently supported!")
+            newShape = np.array(np.round(newShape), dtype=int)
+
+            matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
+            matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
+
+            if orientation == 'coronal':
+                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
+            else:
+                raise ValueError("Only 'coronal' orientation is currently supported!")
+            img_highres.save(filename)
     
-    def run_slide_deck_creation(self, slides, abs_shifts, orientation, output_path, dti_ref, downsample = 1):
+    def run_slide_deck_creation(self, slides, abs_shifts, orientation, modality, output_path, mri_ref, downsample = 1):
+        # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
-        slide_deck = self.create_slide_deck(slides, abs_shifts, orientation, downsample, applyshift=True)
-        self.apply_registration(slide_deck, 'slide_deck', downsample)
-        matfile, _ = self.align_dti_to_psoct(dti_ref)
-        psoct_in_dti_file = self.align_psoct_to_dti(matfile, dti_ref)
-        self.update_nifti_headers(psoct_in_dti_file, orientation)
-        return psoct_in_dti_file
-
-
-    # def apply_to_highres(self):
-    #     # Now apply this header to the high res images
-    #     # Note: they need to be zero-padded first and shifted!!
-    #     import fsl.transform.affine as affine
-
-    #     first, last = self.slide_range
-
-    #     # Careful here: slides are now going in the opposite direction
-    #     # I.e. idx:0->N-1 and sl:last->first
-    #     lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
-
-    #     for sl in lookup:
-    #         idx = lookup[sl]
-    #         print(idx, sl)
-    #         img_lr   = indiv_slides[f'out{str(idx).zfill(4)}']
-            
-    #         # Load Image
-    #         rel_path = self.slides_dict[sl].relative_to(self.inp_path)
-    #         # filename = self.output_path / str(rel_path.name).replace('.nii.gz', '_hdr.nii.gz')
-    #         hr_file = f'/vols/Data/sj/CMC/data/Moe/PSOCT/Retardance/Slice_{sl}_EnR'
-    #         if not os.path.exists(hr_file+'.nii.gz'):
-    #             print('File does not exist, skip')
-    #             continue
-    #         img_hr = Image(hr_file).data[:,:,0]
-    #         # Zero-pad and shift
-    #         new_shape    = [x*10 for x in self.ref_shape]
-    #         img_zp       = pad_image(img_hr, new_shape)
-    #         t            = get_total_shift(all_shifts, sl, self.ref_slide, first_slide=self.slide_range[0])
-    #         img_zp_shift = shift(img_zp, [x*10 for x in t])
-
-    #         newShape = [img_lr.shape[0]*10, img_lr.shape[1], img_lr.shape[2]*10]
-    #         newShape = np.array(np.round(newShape), dtype=int)
-
-    #         matrix = affine.rescale(img_lr.shape, newShape, 'centre')
-    #         matrix = affine.concat(img_lr.voxToWorldMat, matrix)
-
-    #         img_hr = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lr.header)
-    #         img_hr.save(hr_file + '_header')
+        self.apply_registration(slides, abs_shifts, orientation, output_name='slide_deck', downsample=downsample)
+        matfile, _ = self.align_mri_to_psoct(mri_ref)
+        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
+        indiv_slides = self.update_nifti_headers(psoct_to_mri_file, orientation)
+        self.apply_to_highres_images(indiv_slides, abs_shifts, orientation, modality)
+        return indiv_slides
+    

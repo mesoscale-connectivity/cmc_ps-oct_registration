@@ -203,25 +203,27 @@ def test_align_mri_to_psoct(step4_alignMRI2PSOCT):
     _, est_mat_file, est_data_file, _ = step4_alignMRI2PSOCT
 
     ref_data_file = datadir / 'fa_to_slides'
-    ref_data = Image(ref_data_file).data
+    ref_img = Image(ref_data_file)
     ref_mat_file = datadir / 'dti_to_slides.mat'
     ref_mat = np.loadtxt(ref_mat_file)
 
-    est_data = Image(est_data_file).data
+    est_img = Image(est_data_file)
     est_mat = np.loadtxt(est_mat_file)
 
     assert np.allclose(ref_mat, est_mat, atol=0.001)
-    assert np.allclose(ref_data, est_data)
+    assert np.allclose(ref_img.data, est_img.data)
+    assert ref_img.header == est_img.header
 
 # Test #5: check PSOCT2MRI alignment matches the reference data
 def test_align_psoct_to_mri(step5_alignPSOCT2MRI):
     _, est_data_file, _ = step5_alignPSOCT2MRI
 
     ref_data_file = datadir / 'slide_deck_with_header'
-    ref_data = Image(ref_data_file).data
-    est_data = Image(est_data_file).data
+    ref_img = Image(ref_data_file)
+    est_img = Image(est_data_file)
 
-    assert np.allclose(ref_data, est_data)
+    assert np.allclose(ref_img.data, est_img.data)
+    assert ref_img.header == est_img.header
 
 # Test #6: check update_nifti_headers & apply_to_highres_images results match the reference data
 def test_nifti_headers(step6_update_headers):

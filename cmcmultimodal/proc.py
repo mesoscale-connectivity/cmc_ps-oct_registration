@@ -348,7 +348,8 @@ class psoct:
     def apply_to_highres_images(self, indiv_slides, shifts, orientation, modality='Retardance'):
         # Now apply this header to the high res images
         # Note: they need to be zero-padded first and shifted!!
-
+        # TODO change this to support multiple modalities
+        # (this requires finding the files within each folder here)
         if self.slide_res == 'highres' and modality == 'Retardance':
             print("Input images are already 'highres'. Skipping this step...")
             return
@@ -395,7 +396,7 @@ class psoct:
                 raise ValueError("Only 'coronal' orientation is currently supported!")
             img_highres.save(filename)
     
-    def run_slide_deck_creation(self, slides, abs_shifts, orientation, modality, output_path, mri_ref, downsample = 1):
+    def run_slide_deck_creation(self, slides, abs_shifts, orientation, modality, output_path, mri_ref, downsample=1):
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)

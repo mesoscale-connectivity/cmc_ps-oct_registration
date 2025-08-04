@@ -21,7 +21,7 @@ datadir = Path(__file__).parent / 'benchmark'
 # to avoid repeating the analysis steps
 @pytest.fixture(scope="module")
 def step1_createClass():
-    data_class = psoct(Path(datadir), lowres=True, slide_range=(98,200))
+    data_class = psoct(Path(datadir), lowres=True, slide_range=(98,200), reg_modality='Retardance')
     return data_class
 
 @pytest.fixture(scope="module")
@@ -41,16 +41,14 @@ def step4_alignMRI2PSOCT(step3_applyRegistration, tmp_path_factory):
     data_class, abs_shifts = step3_applyRegistration
     tmpdir = tmp_path_factory.mktemp("test_results")
     data_class.output_path = tmpdir
-    mri_ref = datadir / 'reoriented_FA.nii.gz'
-    # mri_ref = datadir / 'dti_FA.nii.gz'
+    mri_ref = datadir / 'MRI' / 'reoriented_FA.nii.gz'
     mat_file, data_file = data_class.align_mri_to_psoct(mri_ref)
     return data_class, mat_file, data_file, abs_shifts
 
 @pytest.fixture(scope="module")
 def step5_alignPSOCT2MRI(step4_alignMRI2PSOCT):
     data_class, mat_file, _, abs_shifts = step4_alignMRI2PSOCT
-    mri_ref = datadir / 'reoriented_FA.nii.gz'
-    # mri_ref = datadir / 'dti_FA.nii.gz'
+    mri_ref = datadir / 'MRI' / 'reoriented_FA.nii.gz'
     data_file = data_class.align_psoct_to_mri(mat_file, mri_ref)
     return data_class, data_file, abs_shifts
 
@@ -227,7 +225,7 @@ def test_align_psoct_to_mri(step5_alignPSOCT2MRI):
 
 # Test #6: check update_nifti_headers & apply_to_highres_images results match the reference data
 def test_nifti_headers(step6_update_headers):
-    output_path = step6_update_headers.output_path
+    output_path = step6_update_headers.output_path / step6_update_headers.reg_modality
     highres_ref = datadir / 'highres_with_header'
     for file in highres_ref.glob('*.nii.gz'):
         ref_img = Image(file)

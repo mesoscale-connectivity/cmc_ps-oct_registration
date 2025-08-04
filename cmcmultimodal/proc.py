@@ -25,8 +25,9 @@ import fsl.transform.affine as affine
 
 class psoct:
 
-    def __init__(self, inp_path, slide_range=None, lowres=True):
+    def __init__(self, inp_path, slide_range=None, lowres=True, reg_modality='Retardance'):
         self.inp_path = Path(inp_path)
+        self.reg_modality = reg_modality
         self.image_files = None
         self.slide_res = None
         self.downsample = 1
@@ -34,6 +35,8 @@ class psoct:
         self.slide_numbers = None
         self.output_path = None
 
+        # run some "processing" during initialisation
+        self.__check_input_folder()
         self._find_all_slides(lowres=lowres)
         # run slide_range setter after finding all the slides
         self.slide_range = slide_range
@@ -78,6 +81,15 @@ class psoct:
         self.ref_slide = 0
         self.ref_shape = 0
         self.slide_deck_img = None
+
+    def __check_input_folder(self):
+        folders = [p.name for p in self.inp_path.iterdir() if p.is_dir()]
+        if not {'MRI', 'PSOCT'}.issubset(folders):
+            raise FileNotFoundError(f"Input folder {self.inp_path} does not contain 'MRI' or 'PSOCT' folders.")
+        modalities = [p.name for p in (self.inp_path / 'PSOCT').iterdir() if p.is_dir()]
+        if not {self.reg_modality}.issubset(modalities):
+            raise FileNotFoundError(f"PSOCT folder does not contain a {self.reg_modality} folder.")
+        self.inp_path = self.inp_path / 'PSOCT' / self.reg_modality
 
     def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
@@ -264,6 +276,7 @@ class psoct:
     
     def apply_registration(self, slides, shifts, orientation, output_name=None, downsample=1, verbose=False):
         # TODO add this in a separate function and make it more data-driven
+        # TODO read this from the json file with sequence details
         # Include pixel dimension in the header
         orig_pixel      = 0.006
         lr_pixel        = orig_pixel * self.downsample
@@ -301,13 +314,13 @@ class psoct:
     
     def align_psoct_to_mri(self, matfile, mri_ref):
         mat     = np.loadtxt(matfile)
-        # TODO should we store the inverted mat?
         mat_inv = np.linalg.inv(mat)
         outfile = self.output_path / 'slide_deck_to_mri'
 
         xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref))
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
+        np.savetxt(self.output_path / 'slides_to_mri.mat', mat_inv, fmt='%.10f', delimiter=' ')
         return outfile
 
     def update_nifti_headers(self, slide_deck, orientation):
@@ -323,9 +336,9 @@ class psoct:
         
         # Careful here: slides are now going in the opposite direction
         # I.e. idx:0->N-1 and sl:last->first
-        # TODO: why are these run in the opposite direction?
         # first, last = self.slide_range
         # lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
+        # TODO read this from the json file with sequence details
         slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
         split_numbers = sorted(list(indiv_slides.keys()))
 
@@ -338,65 +351,76 @@ class psoct:
             fileparts = rel_path.name.split('_')
             fileparts[1] = str(sl).zfill(3)
             rel_path = rel_path.parent / '_'.join(fileparts)
-            filename = self.output_path / str(rel_path).replace('.nii.gz', '_hdr.nii.gz')
+            filename = self.output_path / self.reg_modality / str(rel_path).replace('.nii.gz', '_hdr.nii.gz')
             os.makedirs(filename.parent, exist_ok=True)
             Image(img.get_fdata(), header=img.header).save(filename)
             indiv_slides[idx] = filename
         
         return indiv_slides
 
-    def apply_to_highres_images(self, indiv_slides, shifts, orientation, modality='Retardance'):
+    def apply_to_highres_images(self, indiv_slides, shifts, orientation, other_images=['Retardance']):
         # Now apply this header to the high res images
         # Note: they need to be zero-padded first and shifted!!
-        # TODO change this to support multiple modalities
-        # (this requires finding the files within each folder here)
-        if self.slide_res == 'highres' and modality == 'Retardance':
-            print("Input images are already 'highres'. Skipping this step...")
-            return
 
-        # Careful here: slides are now going in the opposite direction
-        # I.e. idx:0->N-1 and sl:last->first
-        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
-        split_numbers = sorted(list(indiv_slides.keys()))
+        # convert other_images to a list if not already
+        if not isinstance(other_images, list):
+            other_images = [other_images]
         
-        for sl, idx, sft in zip(slide_numbers, split_numbers, shifts):
-            img_lowres = Image(indiv_slides[idx])
+        # run alignment across all modalities
+        for mod in other_images:
+            if self.slide_res == 'highres' and mod == self.reg_modality:
+                return
+
+            data_path = self.inp_path.parent / mod
+            data_files = sorted(data_path.glob('Slice_*_En*.nii.gz'))
+            # TODO make this more versatile
+            mod_slide_numbers = np.array([int(Path(f).name.split('_')[1]) for f in data_files])
+
+            # Careful here: slides are now going in the opposite direction
+            # I.e. idx:0->N-1 and sl:last->first
+            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
+            split_numbers = sorted(list(indiv_slides.keys()))
             
-            # TODO make filenaming more robust to differences between lowres and highres folders
-            # Load Image
-            highres_file = self.inp_path / self.slides_dict[sl].name
-            fileparts = highres_file.name.split('_')
-            fileparts[1] = str(sl).zfill(3)
-            highres_file = highres_file.parent / '_'.join(fileparts)
+            for sl, idx, sft in zip(slide_numbers, split_numbers, shifts):
+                # skip bad_slides
+                if sl in self.bad_slides:
+                    continue
+                
+                img_lowres = Image(indiv_slides[idx])
+                
+                # Load Image
+                mod_idx = np.where(mod_slide_numbers == sl)[0]
+                if len(mod_idx) != 1:
+                    print(f"Unexpected number of matching files for '{mod}', file number {sl}. Skipping this file.")
+                    continue
+                
+                highres_file = data_files[mod_idx[0]]
+                filename = self.output_path / mod / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
+                img_highres = Image(highres_file).data[:,:,0]
 
-            filename = self.output_path / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
-            if not os.path.exists(highres_file):
-                print(f"File {highres_file.name} does not exist, skip.")
-                continue
-            img_highres = Image(highres_file).data[:,:,0]
+                # Zero-pad and shift
+                highres_shape = [x * self.downsample for x in self.ref_shape]
+                img_padded    = pad_image(img_highres, highres_shape)
+                img_zp_shift  = shift(img_padded, sft * self.downsample)
+                
+                # TODO update for other orientations
+                if orientation == 'coronal':
+                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
+                else:
+                    raise ValueError("Only 'coronal' orientation is currently supported!")
+                newShape = np.array(np.round(newShape), dtype=int)
 
-            # Zero-pad and shift
-            highres_shape = [x * self.downsample for x in self.ref_shape]
-            img_padded    = pad_image(img_highres, highres_shape)
-            img_zp_shift  = shift(img_padded, sft * self.downsample)
-            
-            # TODO update for other orientations
-            if orientation == 'coronal':
-                newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
-            else:
-                raise ValueError("Only 'coronal' orientation is currently supported!")
-            newShape = np.array(np.round(newShape), dtype=int)
+                matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
+                matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
 
-            matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
-            matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
-
-            if orientation == 'coronal':
-                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
-            else:
-                raise ValueError("Only 'coronal' orientation is currently supported!")
-            img_highres.save(filename)
+                if orientation == 'coronal':
+                    img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
+                else:
+                    raise ValueError("Only 'coronal' orientation is currently supported!")
+                os.makedirs(filename.parent, exist_ok=True)
+                img_highres.save(filename)
     
-    def run_slide_deck_creation(self, slides, abs_shifts, orientation, modality, output_path, mri_ref, downsample=1):
+    def run_slide_deck_creation(self, slides, abs_shifts, orientation, other_images, output_path, mri_ref, downsample=1):
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
@@ -404,6 +428,6 @@ class psoct:
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file, orientation)
-        self.apply_to_highres_images(indiv_slides, abs_shifts, orientation, modality)
+        self.apply_to_highres_images(indiv_slides, abs_shifts, orientation, other_images)
         return indiv_slides
     

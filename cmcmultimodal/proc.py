@@ -22,6 +22,8 @@ from fsl.wrappers.avwutils  import fslsplit
 from fsl.wrappers           import LOAD
 import fsl.transform.affine as affine
 
+# create sentinel object for slide_range
+_UNSET = object()
 
 class psoct:
 
@@ -31,7 +33,7 @@ class psoct:
         self.image_files = None
         self.slide_res = None
         self.downsample = 1
-        self._slide_range = None
+        self._slide_range = _UNSET
         self.slide_numbers = None
         self.output_path = None
 
@@ -51,7 +53,7 @@ class psoct:
         if value == self._slide_range:
             return
         if value is None:
-            self._slide_range = None
+            self._slide_range = tuple([min(self.slide_numbers),max(self.slide_numbers)])
         elif isinstance(value, (list, tuple)) and len(value) == 2:
             if all(isinstance(v, int) for v in value) and value[0] <= value[1]:
                 if value[0] < min(self.slide_numbers):
@@ -93,7 +95,6 @@ class psoct:
 
     def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
-        # TODO add 'modality' option for data path
         if lowres:
             self.image_files = sorted(self.inp_path.glob('lowres/' + 'Slice_*_En*.nii.gz'))
             self.slide_res = 'lowres'
@@ -105,17 +106,14 @@ class psoct:
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
 
     def _load_slides(self):
-        if self.slide_range is not None:
-            # TODO optimise the performance by looping through the shortest range
-            # i.e. slide_range[1]-slide_range[0] vs slide_numbers[-1]-slide_numbers[0]
-            # slides_dict contains file names, not data
-            for sl, f in zip(self.slide_numbers, self.image_files):
-                # slide_range is inclusive
-                if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
-                    self.slides_dict[sl] = f
-                    # TODO should we add a slides_dict_numbers to keep the indices of the original selection?
-        else:
-            self.slides_dict = self.image_files
+        # TODO optimise the performance by looping through the shortest range
+        # i.e. slide_range[1]-slide_range[0] vs slide_numbers[-1]-slide_numbers[0]
+        # slides_dict contains file names, not data
+        for sl, f in zip(self.slide_numbers, self.image_files):
+            # slide_range is inclusive
+            if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
+                self.slides_dict[sl] = f
+                # TODO should we add a slides_dict_numbers to keep the indices of the original selection?
 
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
@@ -150,7 +148,7 @@ class psoct:
             # If both are Inf (logically impossible but could happen if slide_numbers is empty), raise an error
             if np.isinf(before) and np.isinf(after):
                 raise ValueError(f"No available slide before or after missing slide {m}")
-            # weights for averaging - TODO not in use
+            # weights for averaging - not in use
             if not np.isinf(before) and not np.isinf(after) and before != after:
                 weights = np.array([m-before, after-m]) / (after-before)
             else:
@@ -204,11 +202,13 @@ class psoct:
         '''
 
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
+        if verbose:
+            print('Reference slide for alignment: ', self.ref_slide)
         # Use all slides for alignment (including interpolated ones)
         # TODO change this to a dict to have them paired?
         slides = np.sort(list(self.slides_dict.keys()))
         rel_shifts = np.zeros((len(slides), 2))
-        # TODO for interpolated_slides the alignment could be skipped
+        # TODO for interpolated_slides the alignment could be skipped?
         for sl in range(len(slides)):
         # Get image from dataframe
             img = get_image(self.slides_dict, slides[sl]) 
@@ -302,7 +302,6 @@ class psoct:
         # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
         mri_img = Image(mri_ref)
-        # TODO discuss default naming conventions
         matfile = self.output_path / 'mri_to_slides.mat'
         outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
         if verbose:

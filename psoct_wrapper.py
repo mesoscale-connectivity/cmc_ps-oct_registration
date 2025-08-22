@@ -58,7 +58,7 @@ def parse_cli_args():
     parser.add_argument('--inp_path',     type=str, required=True, help="Input path to PSOCT dataset. Select the subject-level folder.")
     parser.add_argument('--out_path',     type=str, required=True, help="Output directory for results")
     parser.add_argument('--mri_ref',      type=str, required=True, help="Reference MRI NIfTI file for alignment")
-    parser.add_argument('--orientation',  type=str, required=True, choices=['coronal', 'axial', 'sagittal'], help='Orientation of PSOCT data acquisition')
+    parser.add_argument('--orientation',  type=str, required=True, choices=['coronal', 'axial', 'sagittal'], help="Orientation of PSOCT data acquisition")
     parser.add_argument('--reg_modality', type=str, required=True, choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
     parser.add_argument('--other_images', type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
     

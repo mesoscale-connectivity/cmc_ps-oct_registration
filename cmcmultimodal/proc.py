@@ -25,6 +25,9 @@ import fsl.transform.affine as affine
 # create sentinel object for slide_range
 _UNSET = object()
 
+# # Lookup table for orientation information
+# OrientationLookup = {'sagittal': 'x', 'coronal': 'y', 'axial': 'z'}
+
 class psoct:
 
     def __init__(self, inp_path, slide_range=None, lowres=True, reg_modality='Retardance'):
@@ -32,6 +35,8 @@ class psoct:
         self.reg_modality = reg_modality
         self.image_files = None
         self.slide_res = None
+        self.seq_params = None
+        self.orientation = None
         self.downsample = 1
         self._slide_range = _UNSET
         self.slide_numbers = None
@@ -85,13 +90,35 @@ class psoct:
         self.slide_deck_img = None
 
     def __check_input_folder(self):
+        # check the MRI & PSOCT folders
         folders = [p.name for p in self.inp_path.iterdir() if p.is_dir()]
         if not {'MRI', 'PSOCT'}.issubset(folders):
             raise FileNotFoundError(f"Input folder {self.inp_path} does not contain 'MRI' or 'PSOCT' folders.")
+        # check the seq_params file
+        self.__check_seq_params()
+        # check the modality folders
         modalities = [p.name for p in (self.inp_path / 'PSOCT').iterdir() if p.is_dir()]
         if not {self.reg_modality}.issubset(modalities):
             raise FileNotFoundError(f"PSOCT folder does not contain a {self.reg_modality} folder.")
         self.inp_path = self.inp_path / 'PSOCT' / self.reg_modality
+
+    def __check_seq_params(self):
+        import json
+        # check if file exists and has a valid format
+        seq_file = self.inp_path / 'PSOCT' / 'seq_params.json'
+        if not seq_file.is_file():
+            raise FileNotFoundError(f"PSOCT folder does not contain a {seq_file.name} file.")
+        try:
+            with open(seq_file, "r") as f:
+                self.seq_params = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format for {seq_file.name}: {e}")
+        # check if the file has the required fields
+        mandatory_keys = {'orientation', 'reverse_order', 'in-plane resolution', 'out-of-plane resolution'}
+        if not mandatory_keys.issubset(self.seq_params):
+            raise ValueError(f"{seq_file.name} file does not contain all mandatory keys: {mandatory_keys}")
+        # if all correct, read data orientation
+        self.orientation = self.seq_params['orientation']
 
     def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
@@ -252,44 +279,46 @@ class psoct:
         return slides, rel_shifts, abs_shifts
     
 
-    def _create_slide_deck(self, slides, shifts, orientation, downsample=1, applyshift=True):
+    def _create_slide_deck(self, slides, shifts, downsample=1, applyshift=True):
         slide_deck = []
         for sl in range(len(slides)):
             img_padded = pad_image(get_image(self.slides_dict, slides[sl]), self.ref_shape)
             if applyshift:
                 img_padded = shift(img_padded, shifts[sl])
             slide_deck.append(img_padded[::downsample,::downsample])
+        # Improve the axis-reordering-flip steps here to apply to all possible data orientations
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
-        # TODO orientation should become an attribute?
-        if orientation == 'coronal':
+        if self.orientation == 'coronal':
             slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
             slide_deck = np.flip(slide_deck, axis=1)
         # TODO complete the following cases
-        elif orientation == 'axial':
+        elif self.orientation == 'axial':
             return 
-        elif orientation == 'sagittal':
+        elif self.orientation == 'sagittal':
             return
         else:
             raise ValueError
         return slide_deck
     
-    def apply_registration(self, slides, shifts, orientation, output_name=None, downsample=1, verbose=False):
+    def apply_registration(self, slides, shifts, output_name=None, downsample=1, verbose=False):
         # TODO add this in a separate function and make it more data-driven
         # TODO read this from the json file with sequence details
         # Include pixel dimension in the header
-        orig_pixel      = 0.006
+        orig_pixel      = self.seq_params['in-plane resolution']
         lr_pixel        = orig_pixel * self.downsample
         lr_pixel_down   = lr_pixel * downsample
-        slice_thickness = 0.25
-        voxdim          = [lr_pixel_down, slice_thickness, lr_pixel_down]
+        slice_thickness = self.seq_params['out-of-plane resolution']
+        # TODO this is also specific to coronal orientation
+        if self.orientation == 'coronal':
+            voxdim = [lr_pixel_down, slice_thickness, lr_pixel_down]
         matrix = np.eye(4)
         for i in range(3):
             matrix[i,i] = voxdim[i]
 
         if verbose:
             print('Creating slide deck image...', end=' ')
-        slide_deck = self._create_slide_deck(slides, shifts, orientation, downsample, applyshift=True)
+        slide_deck = self._create_slide_deck(slides, shifts, downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
@@ -301,7 +330,11 @@ class psoct:
     def align_mri_to_psoct(self, mri_ref, verbose=False):
         # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
-        mri_img = Image(mri_ref)
+        if mri_ref.is_absolute():
+            mri_ref_fullpath = mri_ref
+        else:
+            mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
+        mri_img = Image(mri_ref_fullpath)
         matfile = self.output_path / 'mri_to_slides.mat'
         outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
         if verbose:
@@ -315,36 +348,33 @@ class psoct:
         mat     = np.loadtxt(matfile)
         mat_inv = np.linalg.inv(mat)
         outfile = self.output_path / 'slide_deck_to_mri'
+        if mri_ref.is_absolute():
+            mri_ref_fullpath = mri_ref
+        else:
+            mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
 
-        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref))
+        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
         np.savetxt(self.output_path / 'slides_to_mri.mat', mat_inv, fmt='%.10f', delimiter=' ')
         return outfile
 
-    def update_nifti_headers(self, slide_deck, orientation):
+    def update_nifti_headers(self, slide_deck):
         # Add header information to single slides
         # This will be useful for visualising high resolution slides on top of the MRI
 
         # First split the slide deck to get individual sides "correct" header
         # TODO add other cases
-        if orientation == 'coronal':
+        if self.orientation == 'coronal':
             indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim='y')
         else:
             raise ValueError("Only 'coronal' orientation is currently supported!")
         
-        # Careful here: slides are now going in the opposite direction
-        # I.e. idx:0->N-1 and sl:last->first
-        # first, last = self.slide_range
-        # lookup = dict( zip(np.arange(first, last+1)[::-1], range(last-first+1)) )
-        # TODO read this from the json file with sequence details
-        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
+        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
         split_numbers = sorted(list(indiv_slides.keys()))
 
-        for sl, idx in zip(slide_numbers, split_numbers):#lookup:
-            # idx = lookup[sl]
-            # print(idx, sl)
-            img = indiv_slides[idx]#[f'out{str(idx).zfill(4)}']
+        for sl, idx in zip(slide_numbers, split_numbers):
+            img = indiv_slides[idx]
             # Get the relative path and update the slide number for the interpolated slides
             rel_path = self.slides_dict[sl].relative_to(self.inp_path)
             fileparts = rel_path.name.split('_')
@@ -357,7 +387,7 @@ class psoct:
         
         return indiv_slides
 
-    def apply_to_highres_images(self, indiv_slides, shifts, orientation, other_images=['Retardance']):
+    def apply_to_highres_images(self, indiv_slides, shifts, other_images=['Retardance']):
         # Now apply this header to the high res images
         # Note: they need to be zero-padded first and shifted!!
 
@@ -375,9 +405,7 @@ class psoct:
             # TODO make this more versatile
             mod_slide_numbers = np.array([int(Path(f).name.split('_')[1]) for f in data_files])
 
-            # Careful here: slides are now going in the opposite direction
-            # I.e. idx:0->N-1 and sl:last->first
-            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=True)
+            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
             split_numbers = sorted(list(indiv_slides.keys()))
             
             for sl, idx, sft in zip(slide_numbers, split_numbers, shifts):
@@ -403,7 +431,7 @@ class psoct:
                 img_zp_shift  = shift(img_padded, sft * self.downsample)
                 
                 # TODO update for other orientations
-                if orientation == 'coronal':
+                if self.orientation == 'coronal':
                     newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
                 else:
                     raise ValueError("Only 'coronal' orientation is currently supported!")
@@ -412,21 +440,22 @@ class psoct:
                 matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
                 matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
 
-                if orientation == 'coronal':
+                if self.orientation == 'coronal':
                     img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
                 else:
                     raise ValueError("Only 'coronal' orientation is currently supported!")
                 os.makedirs(filename.parent, exist_ok=True)
                 img_highres.save(filename)
     
-    def run_slide_deck_creation(self, slides, abs_shifts, orientation, other_images, output_path, mri_ref, downsample=1):
+    def run_slide_deck_creation(self, slides, abs_shifts, other_images, output_path, mri_ref, downsample=1):
+        mri_ref = Path(mri_ref)
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
-        self.apply_registration(slides, abs_shifts, orientation, output_name='slide_deck', downsample=downsample)
+        self.apply_registration(slides, abs_shifts, output_name='slide_deck', downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
-        indiv_slides = self.update_nifti_headers(psoct_to_mri_file, orientation)
-        self.apply_to_highres_images(indiv_slides, abs_shifts, orientation, other_images)
+        indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
+        self.apply_to_highres_images(indiv_slides, abs_shifts, other_images)
         return indiv_slides
     

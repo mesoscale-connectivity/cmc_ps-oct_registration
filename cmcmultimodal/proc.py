@@ -25,8 +25,9 @@ import fsl.transform.affine as affine
 # create sentinel object for slide_range
 _UNSET = object()
 
-# # Lookup table for orientation information
-# OrientationLookup = {'sagittal': 'x', 'coronal': 'y', 'axial': 'z'}
+# Lookup table for orientation information
+OrientationLookup = {'sagittal': 'x', 'coronal': 'y', 'axial': 'z',
+                     'Sagittal': 'x', 'Coronal': 'y', 'Axial': 'z'}
 
 class psoct:
 
@@ -286,32 +287,41 @@ class psoct:
             if applyshift:
                 img_padded = shift(img_padded, shifts[sl])
             slide_deck.append(img_padded[::downsample,::downsample])
-        # Improve the axis-reordering-flip steps here to apply to all possible data orientations
+        # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
-        if self.orientation == 'coronal':
+        if self.orientation == 'sagittal':
+            slide_deck = np.transpose(slide_deck,(2,0,1)).copy()
+            if self.seq_params['reverse_order']:
+                slide_deck = np.flip(slide_deck, axis=0)
+        elif self.orientation == 'coronal':
             slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
-            slide_deck = np.flip(slide_deck, axis=1)
-        # TODO complete the following cases
+            if self.seq_params['reverse_order']:
+                slide_deck = np.flip(slide_deck, axis=1)
         elif self.orientation == 'axial':
-            return 
-        elif self.orientation == 'sagittal':
-            return
+            # order of indices is already correct
+            if self.seq_params['reverse_order']:
+                slide_deck = np.flip(slide_deck, axis=2)
         else:
             raise ValueError
         return slide_deck
     
     def apply_registration(self, slides, shifts, output_name=None, downsample=1, verbose=False):
-        # TODO add this in a separate function and make it more data-driven
-        # TODO read this from the json file with sequence details
+        # TODO add this in a separate function?
         # Include pixel dimension in the header
         orig_pixel      = self.seq_params['in-plane resolution']
         lr_pixel        = orig_pixel * self.downsample
         lr_pixel_down   = lr_pixel * downsample
         slice_thickness = self.seq_params['out-of-plane resolution']
-        # TODO this is also specific to coronal orientation
-        if self.orientation == 'coronal':
+        # Create voxel dimension matrix based on orientation
+        if self.orientation == 'sagittal':
+            voxdim = [slice_thickness, lr_pixel_down, lr_pixel_down]
+        elif self.orientation == 'coronal':
             voxdim = [lr_pixel_down, slice_thickness, lr_pixel_down]
+        elif self.orientation == 'axial':
+            voxdim = [lr_pixel_down, lr_pixel_down, slice_thickness]
+        else:
+            raise ValueError(f"Unexpected orientation value: {self.orientation}")
         matrix = np.eye(4)
         for i in range(3):
             matrix[i,i] = voxdim[i]
@@ -364,11 +374,10 @@ class psoct:
         # This will be useful for visualising high resolution slides on top of the MRI
 
         # First split the slide deck to get individual sides "correct" header
-        # TODO add other cases
-        if self.orientation == 'coronal':
-            indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim='y')
+        if self.orientation in OrientationLookup.keys():
+            indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim=OrientationLookup[self.orientation])
         else:
-            raise ValueError("Only 'coronal' orientation is currently supported!")
+            raise ValueError(f"Unexpected orientation value: {self.orientation}")
         
         slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
         split_numbers = sorted(list(indiv_slides.keys()))
@@ -430,20 +439,27 @@ class psoct:
                 img_padded    = pad_image(img_highres, highres_shape)
                 img_zp_shift  = shift(img_padded, sft * self.downsample)
                 
-                # TODO update for other orientations
-                if self.orientation == 'coronal':
+                if self.orientation == 'sagittal':
+                    newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
+                elif self.orientation == 'coronal':
                     newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
+                elif self.orientation == 'axial':
+                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1]*self.downsample, img_lowres.shape[2]]
                 else:
-                    raise ValueError("Only 'coronal' orientation is currently supported!")
+                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
                 newShape = np.array(np.round(newShape), dtype=int)
 
                 matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
                 matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
 
-                if self.orientation == 'coronal':
+                if self.orientation == 'sagittal':
+                    img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=img_lowres.header)
+                elif self.orientation == 'coronal':
                     img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
+                elif self.orientation == 'axial':
+                    img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=img_lowres.header)
                 else:
-                    raise ValueError("Only 'coronal' orientation is currently supported!")
+                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
                 os.makedirs(filename.parent, exist_ok=True)
                 img_highres.save(filename)
     

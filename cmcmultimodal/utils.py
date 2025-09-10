@@ -97,6 +97,6 @@ def get_total_shift(all_shifts, sl, central_slide, first_slide=1):
     """Add shifts all the way to central slide
     """
     if sl < central_slide:
-        return np.sum(all_shifts[sl-first_slide:central_slide-first_slide,:], axis=0)
+        return np.sum(all_shifts[sl-first_slide:central_slide-first_slide+1,:], axis=0)
     else:
-        return np.sum(all_shifts[central_slide-first_slide:sl-first_slide,:], axis=0)
+        return np.sum(all_shifts[central_slide-first_slide:sl-first_slide+1,:], axis=0)

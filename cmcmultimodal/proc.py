@@ -468,6 +468,9 @@ class psoct:
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
+        # save shifts to a text file
+        np.savetxt(self.output_path / 'absolute_shifts.txt', abs_shifts, fmt='%.1f', delimiter=' ')
+        # save slide decks and header information
         self.apply_registration(slides, abs_shifts, output_name='slide_deck', downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)

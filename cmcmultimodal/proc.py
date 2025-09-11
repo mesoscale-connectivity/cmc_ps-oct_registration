@@ -88,6 +88,8 @@ class psoct:
         self.interpolated_slides = []
         self.ref_slide = 0
         self.ref_shape = 0
+        self.rel_shifts = {}
+        self.abs_shifts = {}
         self.slide_deck_img = None
 
     def __check_input_folder(self):
@@ -134,14 +136,10 @@ class psoct:
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
 
     def _load_slides(self):
-        # TODO optimise the performance by looping through the shortest range
-        # i.e. slide_range[1]-slide_range[0] vs slide_numbers[-1]-slide_numbers[0]
-        # slides_dict contains file names, not data
         for sl, f in zip(self.slide_numbers, self.image_files):
             # slide_range is inclusive
             if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
-                self.slides_dict[sl] = f
-                # TODO should we add a slides_dict_numbers to keep the indices of the original selection?
+                self.slides_dict[sl] = f  # slides_dict contains file names, not data
 
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
@@ -233,59 +231,53 @@ class psoct:
         if verbose:
             print('Reference slide for alignment: ', self.ref_slide)
         # Use all slides for alignment (including interpolated ones)
-        # TODO change this to a dict to have them paired?
-        slides = np.sort(list(self.slides_dict.keys()))
-        rel_shifts = np.zeros((len(slides), 2))
+        slides = sorted(list(self.slides_dict.keys()))
+        # rel_shifts = np.zeros((len(slides), 2))
         # TODO for interpolated_slides the alignment could be skipped?
-        for sl in range(len(slides)):
+        for sl in slides:
         # Get image from dataframe
-            img = get_image(self.slides_dict, slides[sl]) 
-            if slides[sl] == self.ref_slide:
+            img = get_image(self.slides_dict, sl) 
+            if sl == self.ref_slide:
                 t = [0, 0] # no shift if it is central slide
             else:
-                if slides[sl] < self.ref_slide:
-                    tgt = get_image(self.slides_dict, slides[sl]+1)
+                if sl < self.ref_slide:
+                    tgt = get_image(self.slides_dict, sl+1)
                 else:
-                    tgt = get_image(self.slides_dict, slides[sl]-1)
+                    tgt = get_image(self.slides_dict, sl-1)
                 t  = calc_shift(img, tgt, self.ref_shape)
                 # don't worry about small shifts
                 t[0] = t[0] if np.abs(t[0])>thr else 0.
                 t[1] = t[1] if np.abs(t[1])>thr else 0.
             # Store shifts
-            rel_shifts[sl] = t
+            self.rel_shifts[sl] = t
             if verbose:
-                print(slides[sl], rel_shifts[sl])
+                print(sl, self.rel_shifts[sl])
+        # # convert arrays to dictionaries
+        # self.rel_shifts = {int(k): v.tolist() for k, v in zip(slides, rel_shifts)}
         # Calculate absolute shifts
-        abs_shifts = self._calc_total_shift(slides, rel_shifts)
+        self._calc_total_shift(self.rel_shifts)
 
-        return slides, rel_shifts, abs_shifts
-
-    def _calc_total_shift(self, slides, rel_shifts):
-        # TODO consider changing the outputs to attributes
-        abs_shifts = np.zeros(rel_shifts.shape)
-        for sl in range(len(slides)):
-            abs_shifts[sl] = get_total_shift(rel_shifts, slides[sl], 
-                                                self.ref_slide, 
-                                                first_slide=self.slide_range[0])
-        return abs_shifts
+    def _calc_total_shift(self, rel_shifts_dict):
+        for sl in rel_shifts_dict.keys():
+            self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
+                                                  self.ref_slide, first_slide=self.slide_range[0])
 
     # Function to be called and "automate" the registration steps
     def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False, verbose=False):
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        slides, rel_shifts, abs_shifts = self.align(ref=align_ref, thr=align_thr, verbose=verbose)
+        self.align(ref=align_ref, thr=align_thr, verbose=verbose)
         if plot_alignment:
-            plot_shifts(slides, rel_shifts, '-o')
-            plot_shifts(slides, abs_shifts, '-')
-        return slides, rel_shifts, abs_shifts
+            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
+            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
     
 
-    def _create_slide_deck(self, slides, shifts, downsample=1, applyshift=True):
+    def _create_slide_deck(self, downsample=1, applyshift=True):
         slide_deck = []
-        for sl in range(len(slides)):
-            img_padded = pad_image(get_image(self.slides_dict, slides[sl]), self.ref_shape)
+        for sl in self.abs_shifts.keys():
+            img_padded = pad_image(get_image(self.slides_dict, sl), self.ref_shape)
             if applyshift:
-                img_padded = shift(img_padded, shifts[sl])
+                img_padded = shift(img_padded, self.abs_shifts[sl])
             slide_deck.append(img_padded[::downsample,::downsample])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
@@ -306,7 +298,7 @@ class psoct:
             raise ValueError
         return slide_deck
     
-    def apply_registration(self, slides, shifts, output_name=None, downsample=1, verbose=False):
+    def apply_registration(self, output_name=None, downsample=1, verbose=False):
         # TODO add this in a separate function?
         # Include pixel dimension in the header
         orig_pixel      = self.seq_params['in-plane resolution']
@@ -328,7 +320,7 @@ class psoct:
 
         if verbose:
             print('Creating slide deck image...', end=' ')
-        slide_deck = self._create_slide_deck(slides, shifts, downsample, applyshift=True)
+        slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
@@ -396,7 +388,7 @@ class psoct:
         
         return indiv_slides
 
-    def apply_to_highres_images(self, indiv_slides, shifts, other_images=['Retardance']):
+    def apply_to_highres_images(self, indiv_slides, other_images=['Retardance']):
         # Now apply this header to the high res images
         # Note: they need to be zero-padded first and shifted!!
 
@@ -417,7 +409,7 @@ class psoct:
             slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
             split_numbers = sorted(list(indiv_slides.keys()))
             
-            for sl, idx, sft in zip(slide_numbers, split_numbers, shifts):
+            for sl, idx in zip(slide_numbers, split_numbers):
                 # skip bad_slides
                 if sl in self.bad_slides:
                     continue
@@ -437,7 +429,7 @@ class psoct:
                 # Zero-pad and shift
                 highres_shape = [x * self.downsample for x in self.ref_shape]
                 img_padded    = pad_image(img_highres, highres_shape)
-                img_zp_shift  = shift(img_padded, sft * self.downsample)
+                img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
                 
                 if self.orientation == 'sagittal':
                     newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
@@ -463,18 +455,26 @@ class psoct:
                 os.makedirs(filename.parent, exist_ok=True)
                 img_highres.save(filename)
     
-    def run_slide_deck_creation(self, slides, abs_shifts, other_images, output_path, mri_ref, downsample=1):
+    def _save_shifts(self):
+        with open(self.output_path / 'abs_shifts.txt', "w") as f:
+            for k, v in self.abs_shifts.items():
+                f.write(f"{k}: {v}\n")
+        with open(self.output_path / 'rel_shifts.txt', "w") as f:
+            for k, v in self.rel_shifts.items():
+                f.write(f"{k}: {v}\n")
+
+    def run_slide_deck_creation(self, other_images, output_path, mri_ref, downsample=1):
         mri_ref = Path(mri_ref)
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
         # save shifts to a text file
-        np.savetxt(self.output_path / 'absolute_shifts.txt', abs_shifts, fmt='%.1f', delimiter=' ')
+        self._save_shifts()
         # save slide decks and header information
-        self.apply_registration(slides, abs_shifts, output_name='slide_deck', downsample=downsample)
+        self.apply_registration(output_name='slide_deck', downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
-        self.apply_to_highres_images(indiv_slides, abs_shifts, other_images)
+        # self.apply_to_highres_images(indiv_slides, other_images)
         return indiv_slides
     

@@ -15,6 +15,7 @@ from cmcmultimodal.proc import psoct
 def run_psoct_pipeline(
     inp_path,
     out_path,
+    seq_params,
     mri_ref,
     lowres=True,
     slide_range=None,
@@ -23,15 +24,15 @@ def run_psoct_pipeline(
     align_thr=0,
     plot_alignment=False,
     reg_modality='Retardance',
-    orientation='coronal',
     reg_downsample=1,
-    other_images=['Retardance', 'Orientation']):
+    other_images=['Retardance', 'Orientation'],
+    verbose=False):
 
     # Initialize the object
-    ps = psoct(inp_path=Path(inp_path), lowres=lowres, slide_range=slide_range, reg_modality=reg_modality)
+    ps = psoct(inp_path=Path(inp_path), seq_params=seq_params, lowres=lowres, slide_range=slide_range, reg_modality=reg_modality, verbose=verbose)
 
     # Run registration
-    slides, rel_shifts, abs_shifts = ps.run_registration(
+    ps.run_registration(
         bad_slides=bad_slides,
         align_ref=align_ref,
         align_thr=align_thr,
@@ -39,38 +40,34 @@ def run_psoct_pipeline(
     )
 
     # Create slide deck and apply headers
-    indiv_slides = ps.run_slide_deck_creation(
-        slides,
-        abs_shifts,
-        orientation=orientation,
+    _ = ps.run_slide_deck_creation(
         other_images=other_images,
         output_path=out_path,
         mri_ref=mri_ref,
         downsample=reg_downsample
     )
 
-    print(f"\nPSOCT pipeline completed and results saved to {out_path}")
-
-
 def parse_cli_args():
     parser = argparse.ArgumentParser(description="PSOCT registration and slide deck creation pipeline")
 
-    parser.add_argument('--inp_path',     type=str, required=True, help="Input path to PSOCT dataset. Select the subject-level folder.")
-    parser.add_argument('--out_path',     type=str, required=True, help="Output directory for results")
-    parser.add_argument('--mri_ref',      type=str, required=True, help="Reference MRI NIfTI file for alignment")
-    parser.add_argument('--orientation',  type=str, required=True, choices=['coronal', 'axial', 'sagittal'], help="Orientation of PSOCT data acquisition")
-    parser.add_argument('--reg_modality', type=str, required=True, choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
-    parser.add_argument('--other_images', type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
+    parser.add_argument('-in',  '--inp_path', type=str, required=True, help="Input path to PSOCT dataset")
+    parser.add_argument('-out', '--out_path', type=str, required=True, help="Output directory for results")
+    parser.add_argument('--seq_params',       type=str, required=True, help="Path to PSOCT sequence parameters' JSON file")
+    parser.add_argument('--mri_ref',          type=str, required=True, help="Reference MRI NIfTI file for alignment")
+    parser.add_argument('--reg_modality',     type=str, required=True, choices=['Retardance', 'Cross', 'Orientation'], help="The PSOCT modality to be used for alignment")
+    parser.add_argument('--other_images',     type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
     
     parser.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
     # parser.add_argument('--non-linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     parser.add_argument('--slide_range', type=int, nargs=2, default=None, help="Range of slides to process (start end)")
-    parser.add_argument('--bad_slides', type=int, nargs='*', default=None, help="List of bad slide numbers to skip")
+    parser.add_argument('--bad_slides',  type=int, nargs='*', default=None, help="List of bad slide numbers to skip")
 
     parser.add_argument('--align_ref', type=str, default='centre', choices=['centre', 'first', 'last'], help="Reference slide for alignment")
-    parser.add_argument('--align_thr', type=float, default=0.0, help="Ignore shifts smaller than this threshold")
+    parser.add_argument('--align_thr', type=float, default=0.0,  help="Ignore shifts smaller than this threshold")
     parser.add_argument('--reg_downsample', type=int, default=1, help="Downsample factor for the slide deck")
-    parser.add_argument('--plot_alignment', action='store_true', help="Plot relative and absolute shifts")
+    # TODO add plot save function for this to be sensible option
+    # parser.add_argument('--plot_alignment', action='store_true', help="Plot relative and absolute shifts (default: False)")
+    parser.add_argument('-v', '--verbose',  action='store_true', help="Print diagnostic information while running (default: False)")
 
     return parser.parse_args()
 
@@ -81,15 +78,16 @@ if __name__ == '__main__':
     run_psoct_pipeline(
         inp_path=args.inp_path,
         out_path=args.out_path,
+        seq_params=args.seq_params,
         mri_ref=args.mri_ref,
-        orientation=args.orientation,
         lowres=(not args.highres),
         slide_range=tuple(args.slide_range) if args.slide_range else None,
         bad_slides=args.bad_slides,
         align_ref=args.align_ref,
         align_thr=args.align_thr,
-        plot_alignment=args.plot_alignment,
+        # plot_alignment=args.plot_alignment,
         reg_modality=args.reg_modality,
         reg_downsample=args.reg_downsample,
-        other_images = args.other_images
+        other_images = args.other_images,
+        verbose=args.verbose
     )

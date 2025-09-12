@@ -26,25 +26,33 @@ import fsl.transform.affine as affine
 _UNSET = object()
 
 # Lookup table for orientation information
-OrientationLookup = {'sagittal': 'x', 'coronal': 'y', 'axial': 'z',
-                     'Sagittal': 'x', 'Coronal': 'y', 'Axial': 'z'}
+OrientationLookup = {'sagittal': ' x', 'coronal':  'y', 'axial':  'z'}
+# FSL convention for orientation
+FSLconvention     = {'sagittal': 'LR', 'coronal': 'PA', 'axial': 'IS'}
 
 class psoct:
 
-    def __init__(self, inp_path, slide_range=None, lowres=True, reg_modality='Retardance'):
-        self.inp_path = Path(inp_path)
-        self.reg_modality = reg_modality
-        self.image_files = None
-        self.slide_res = None
-        self.seq_params = None
-        self.orientation = None
-        self.downsample = 1
-        self._slide_range = _UNSET
-        self.slide_numbers = None
-        self.output_path = None
+    def __init__(self, inp_path, seq_params, slide_range=None, lowres=True, reg_modality='Retardance', verbose=False):
+        self.inp_path       = Path(inp_path)
+        self.reg_modality   = reg_modality
+        self.image_files    = None
+        self.slide_res      = None
+        self.seq_params     = None
+        self.orientation    = None
+        self.reverse_slides = False
+        self.downsample     = 1
+        self._slide_range   = _UNSET
+        self.slide_numbers  = None
+        self.output_path    = None
+        self.verbose        = verbose
 
-        # run some "processing" during initialisation
+        if self.verbose:
+            print(f"\nReading input information for '{self.inp_path}' ...")
+        # check validity of input folder
         self.__check_input_folder()
+        # check validity of seq_params file
+        self._read_seq_params(seq_params)
+        # run some "processing" during initialisation
         self._find_all_slides(lowres=lowres)
         # run slide_range setter after finding all the slides
         self.slide_range = slide_range
@@ -92,36 +100,77 @@ class psoct:
         self.abs_shifts = {}
         self.slide_deck_img = None
 
+    def _find_missing_slides(self):
+        '''Get list of missing slides.'''
+        if self.slide_range is not None and self.slide_numbers is not None:
+            self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
+            self.missing_slides = list(map(int, self.missing_slides))
+            if self.verbose and len(self.missing_slides) > 0:
+                print(f"\tFound {len(self.missing_slides)} missing slides: {self.missing_slides}")
+
+    def _load_slides(self):
+        for sl, f in zip(self.slide_numbers, self.image_files):
+            # slide_range is inclusive
+            if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
+                self.slides_dict[sl] = f  # slides_dict contains file names, not data
+
     def __check_input_folder(self):
         # check the MRI & PSOCT folders
         folders = [p.name for p in self.inp_path.iterdir() if p.is_dir()]
         if not {'MRI', 'PSOCT'}.issubset(folders):
             raise FileNotFoundError(f"Input folder {self.inp_path} does not contain 'MRI' or 'PSOCT' folders.")
-        # check the seq_params file
-        self.__check_seq_params()
         # check the modality folders
         modalities = [p.name for p in (self.inp_path / 'PSOCT').iterdir() if p.is_dir()]
         if not {self.reg_modality}.issubset(modalities):
             raise FileNotFoundError(f"PSOCT folder does not contain a {self.reg_modality} folder.")
         self.inp_path = self.inp_path / 'PSOCT' / self.reg_modality
+        if self.verbose:
+            print('\tInput folder read successfully.')
 
-    def __check_seq_params(self):
+    def __check_seq_params(self, seq_params):
         import json
         # check if file exists and has a valid format
-        seq_file = self.inp_path / 'PSOCT' / 'seq_params.json'
+        seq_file = Path(seq_params)
         if not seq_file.is_file():
-            raise FileNotFoundError(f"PSOCT folder does not contain a {seq_file.name} file.")
+            raise FileNotFoundError(f"{seq_file} file not found.")
         try:
             with open(seq_file, "r") as f:
                 self.seq_params = json.load(f)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON format for {seq_file.name}: {e}")
+            raise ValueError(f"Invalid JSON format for {seq_file}: {e}")
         # check if the file has the required fields
-        mandatory_keys = {'orientation', 'reverse_order', 'in-plane resolution', 'out-of-plane resolution'}
+        mandatory_keys = {'orientation', 'slice_order', 'in-plane resolution', 'out-of-plane resolution'}
         if not mandatory_keys.issubset(self.seq_params):
-            raise ValueError(f"{seq_file.name} file does not contain all mandatory keys: {mandatory_keys}")
+            raise ValueError(f"{seq_file} file does not contain all mandatory keys: {mandatory_keys}")
+    
+    def _read_seq_params(self, seq_params):
+        # check if JSON file is of a valid format
+        self.__check_seq_params(seq_params)
         # if all correct, read data orientation
         self.orientation = self.seq_params['orientation']
+        # make orientation lowercase to account for potentially capitalising first letter
+        if isinstance(self.orientation, str):
+            self.orientation = self.orientation.lower()
+        else:
+            raise ValueError(f"Unexpected orientation datatype: {type(self.orientation)}. Expected a string.")
+        # read slice_order and check if it is compatible with the orientation
+        slice_order = self.seq_params['slice_order']
+        if self.orientation == 'sagittal':
+            if slice_order not in {'LR', 'RL'}:
+                raise ValueError(f"Unexpected 'slice_order' value: {slice_order}. Expected 'LR' or 'RL'.")
+        elif self.orientation == 'coronal':
+            if slice_order not in {'AP', 'PA'}:
+                raise ValueError(f"Unexpected 'slice_order' value: {slice_order}. Expected 'AP' or 'PA'.")
+        elif self.orientation == 'axial':
+            if slice_order not in {'SI', 'IS'}:
+                raise ValueError(f"Unexpected 'slice_order' value: {slice_order}. Expected 'SI' or 'IS'.")
+        else:
+            raise ValueError(f"Unexpected orientation value: {self.orientation}. Expected 'sagittal', 'coronal' or 'axial'.")
+        if self.verbose:
+            print('\tPSOCT sequence parameters read successfully.')
+        # check if slice_order is compatible with FSL convention, otherwise reverse slides during processing
+        if slice_order != FSLconvention[self.orientation]:
+            self.reverse_slides = True
 
     def _find_all_slides(self, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
@@ -134,17 +183,6 @@ class psoct:
             self.slide_res = 'highres'
         # TODO: the specificity of the file format is interlinked with the io.py
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
-
-    def _load_slides(self):
-        for sl, f in zip(self.slide_numbers, self.image_files):
-            # slide_range is inclusive
-            if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
-                self.slides_dict[sl] = f  # slides_dict contains file names, not data
-
-    def _find_missing_slides(self):
-        '''Get list of missing slides.'''
-        if self.slide_range is not None and self.slide_numbers is not None:
-            self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
 
     def label_bad_slides(self, indices=None):
         ''' List of bad slides as defined by visual assessment.'''
@@ -190,6 +228,8 @@ class psoct:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == before)[0][0]]
             else:
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == after)[0][0]]
+        if self.verbose:
+            print('\tMissing slides have been interpolated successfully.')
 
     def _find_central_slide(self):
         # Find the size of each slide (excluding the interpolated ones)
@@ -217,7 +257,7 @@ class psoct:
             raise ValueError(f'Unexpected reference method {ref} for alignment.')
         return ref_slide, ref_shape
 
-    def align(self, ref='centre', thr=0, verbose=False):
+    def align(self, ref='centre', thr=0):
         ''' This method calculates the shifts between each slide and its neighbour.
         If the slide is before the central slide, it looks at the neighbour in front,
         otherwise look at the neighbour behind
@@ -228,12 +268,14 @@ class psoct:
         '''
 
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
-        if verbose:
-            print('Reference slide for alignment: ', self.ref_slide)
+        if self.verbose:
+            print(f"\tReference slide for alignment: {self.ref_slide}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
         # rel_shifts = np.zeros((len(slides), 2))
         # TODO for interpolated_slides the alignment could be skipped?
+        if self.verbose:
+            print('\tRelative alignment values:')
         for sl in slides:
         # Get image from dataframe
             img = get_image(self.slides_dict, sl) 
@@ -250,8 +292,8 @@ class psoct:
                 t[1] = t[1] if np.abs(t[1])>thr else 0.
             # Store shifts
             self.rel_shifts[sl] = t
-            if verbose:
-                print(sl, self.rel_shifts[sl])
+            if self.verbose:
+                print('\t\t', sl, self.rel_shifts[sl])
         # # convert arrays to dictionaries
         # self.rel_shifts = {int(k): v.tolist() for k, v in zip(slides, rel_shifts)}
         # Calculate absolute shifts
@@ -263,13 +305,17 @@ class psoct:
                                                   self.ref_slide, first_slide=self.slide_range[0])
 
     # Function to be called and "automate" the registration steps
-    def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False, verbose=False):
+    def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False):
+        if self.verbose:
+            print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        self.align(ref=align_ref, thr=align_thr, verbose=verbose)
+        self.align(ref=align_ref, thr=align_thr)
         if plot_alignment:
             plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
             plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
+        if self.verbose:
+            print('Slide registration completed.')
     
 
     def _create_slide_deck(self, downsample=1, applyshift=True):
@@ -284,21 +330,21 @@ class psoct:
         # Reorient slide deck to make coronal
         if self.orientation == 'sagittal':
             slide_deck = np.transpose(slide_deck,(2,0,1)).copy()
-            if self.seq_params['reverse_order']:
+            if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=0)
         elif self.orientation == 'coronal':
             slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
-            if self.seq_params['reverse_order']:
+            if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=1)
         elif self.orientation == 'axial':
             # order of indices is already correct
-            if self.seq_params['reverse_order']:
+            if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=2)
         else:
-            raise ValueError
+            raise ValueError(f"Unexpected orientation value: {self.orientation}")
         return slide_deck
     
-    def apply_registration(self, output_name=None, downsample=1, verbose=False):
+    def apply_registration(self, output_name=None, downsample=1):
         # TODO add this in a separate function?
         # Include pixel dimension in the header
         orig_pixel      = self.seq_params['in-plane resolution']
@@ -318,18 +364,18 @@ class psoct:
         for i in range(3):
             matrix[i,i] = voxdim[i]
 
-        if verbose:
-            print('Creating slide deck image...', end=' ')
+        if self.verbose:
+            print('\tCreating slide deck image ...', end=' ')
         slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix)
         if output_name is not None:
             self.slide_deck_img.save(self.output_path / output_name)
-        if verbose:
+        if self.verbose:
             print('Done.')
 
     # TODO add fnirt option
-    def align_mri_to_psoct(self, mri_ref, verbose=False):
+    def align_mri_to_psoct(self, mri_ref):
         # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
         if mri_ref.is_absolute():
@@ -339,10 +385,10 @@ class psoct:
         mri_img = Image(mri_ref_fullpath)
         matfile = self.output_path / 'mri_to_slides.mat'
         outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
-        if verbose:
-            print('Running flirt...', end=' ')
+        if self.verbose:
+            print('\tRunning MRI-to-PSOCT registration ...', end=' ')
         flirt(src=mri_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
-        if verbose:
+        if self.verbose:
             print('Done.')
         return matfile, outfile
     
@@ -359,6 +405,7 @@ class psoct:
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
         np.savetxt(self.output_path / 'slides_to_mri.mat', mat_inv, fmt='%.10f', delimiter=' ')
+        
         return outfile
 
     def update_nifti_headers(self, slide_deck):
@@ -371,9 +418,11 @@ class psoct:
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
         
-        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
+        slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
         split_numbers = sorted(list(indiv_slides.keys()))
 
+        if self.verbose:
+            print('\tUpdating headers for slides:', end=' ')
         for sl, idx in zip(slide_numbers, split_numbers):
             img = indiv_slides[idx]
             # Get the relative path and update the slide number for the interpolated slides
@@ -385,7 +434,10 @@ class psoct:
             os.makedirs(filename.parent, exist_ok=True)
             Image(img.get_fdata(), header=img.header).save(filename)
             indiv_slides[idx] = filename
-        
+            if self.verbose:
+                print(sl, end=',')
+        if self.verbose:
+            print(' Done.')
         return indiv_slides
 
     def apply_to_highres_images(self, indiv_slides, other_images=['Retardance']):
@@ -398,6 +450,8 @@ class psoct:
         
         # run alignment across all modalities
         for mod in other_images:
+            if self.verbose:
+                print(f"\tApplying registration matrix to '{mod}' slides ...")
             if self.slide_res == 'highres' and mod == self.reg_modality:
                 return
 
@@ -406,7 +460,7 @@ class psoct:
             # TODO make this more versatile
             mod_slide_numbers = np.array([int(Path(f).name.split('_')[1]) for f in data_files])
 
-            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.seq_params['reverse_order'])
+            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
             split_numbers = sorted(list(indiv_slides.keys()))
             
             for sl, idx in zip(slide_numbers, split_numbers):
@@ -418,8 +472,8 @@ class psoct:
                 
                 # Load Image
                 mod_idx = np.where(mod_slide_numbers == sl)[0]
-                if len(mod_idx) != 1:
-                    print(f"Unexpected number of matching files for '{mod}', file number {sl}. Skipping this file.")
+                if len(mod_idx) != 1 and self.verbose:
+                    print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
                 
                 highres_file = data_files[mod_idx[0]]
@@ -454,6 +508,8 @@ class psoct:
                     raise ValueError(f"Unexpected orientation value: {self.orientation}")
                 os.makedirs(filename.parent, exist_ok=True)
                 img_highres.save(filename)
+            if self.verbose:
+                print(f"\tRegistration of '{mod}' slides completed.")
     
     def _save_shifts(self):
         with open(self.output_path / 'abs_shifts.txt', "w") as f:
@@ -462,8 +518,12 @@ class psoct:
         with open(self.output_path / 'rel_shifts.txt', "w") as f:
             for k, v in self.rel_shifts.items():
                 f.write(f"{k}: {v}\n")
+        if self.verbose:
+            print('\tRelative and absolute shifts saved.')
 
     def run_slide_deck_creation(self, other_images, output_path, mri_ref, downsample=1):
+        if self.verbose:
+            print('\nStarting slide deck creation ...')
         mri_ref = Path(mri_ref)
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
@@ -475,6 +535,8 @@ class psoct:
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
-        # self.apply_to_highres_images(indiv_slides, other_images)
+        self.apply_to_highres_images(indiv_slides, other_images)
+        if self.verbose:
+            print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
         return indiv_slides
     

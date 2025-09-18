@@ -13,14 +13,14 @@ import numpy as np
 from pathlib import Path
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
-                                   plot_shifts, pad_image
+                                   plot_shifts, pad_image, calc_flirt, get_total_mat
 from scipy.ndimage          import shift
 from fsl.data.image         import Image
-from fsl.wrappers           import flirt
+from fsl.wrappers           import flirt, LOAD, applyxfm
 from fsl.transform.flirt    import flirtMatrixToSform
 from fsl.wrappers.avwutils  import fslsplit
-from fsl.wrappers           import LOAD
 import fsl.transform.affine as affine
+from cmcmultimodal.io import save_nifti
 
 # create sentinel object for slide_range
 _UNSET = object()
@@ -240,24 +240,40 @@ class psoct:
         # Find all slides that have max size and take the median as the central slide
         max_indices = np.where(all_sizes == np.max(all_sizes))[0]
         central_slide_num = all_slides[round(np.median(max_indices))]
-        # Get the shape of the central slide
-        central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
-        return central_slide_num, central_slide_shape
+        return central_slide_num
+    
+    def _find_max_shape(self):
+        # Independent function to find the max shape across slides, irrespective of zeroes
+        # Find the size of each slide (excluding the interpolated ones)
+        all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
+        max_size = 0
+        idx = None
+        for slide in range(len(all_slides)):
+            size = np.prod(get_image(self.slides_dict, all_slides[slide]).shape)
+            if size > max_size:
+                max_size = size
+                idx = slide
+        if idx is None:
+            raise ValueError("All input images have zero size!")
+        else:
+            max_slide_shape = get_image(self.slides_dict, all_slides[idx]).shape
+            # # increase max slide shape by 10% each side
+            # max_slide_shape = [i+min(max_slide_shape)//5 for i in max_slide_shape]
+        return max_slide_shape
     
     def _get_ref_slide(self, ref):
         if ref == 'centre':
-            ref_slide, ref_shape = self._find_central_slide()
+            ref_slide = self._find_central_slide()
         elif ref == 'first':
             ref_slide = np.min(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, ref_slide).shape
         elif ref == 'last':
             ref_slide = np.max(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, ref_slide).shape
         else:
             raise ValueError(f'Unexpected reference method {ref} for alignment.')
+        ref_shape = self._find_max_shape()
         return ref_slide, ref_shape
 
-    def align(self, ref='centre', thr=0):
+    def align(self, method='flirt', ref='centre', thr=0):
         ''' This method calculates the shifts between each slide and its neighbour.
         If the slide is before the central slide, it looks at the neighbour in front,
         otherwise look at the neighbour behind
@@ -266,43 +282,66 @@ class psoct:
         - ref: reference mode for alignment ('centre' for using the central slide)
         - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
         '''
-
+        self.align_method = method
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
         if self.verbose:
-            print(f"\tReference slide for alignment: {self.ref_slide}")
+            print(f"\tReference slide for alignment: {self.ref_slide}, size={self.ref_shape}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
-        # rel_shifts = np.zeros((len(slides), 2))
         # TODO for interpolated_slides the alignment could be skipped?
-        if self.verbose:
-            print('\tRelative alignment values:')
+        # if self.verbose:
+        #     print('\tRelative alignment values:')
         for sl in slides:
-        # Get image from dataframe
-            img = get_image(self.slides_dict, sl) 
+            # Get image from dataframe
             if sl == self.ref_slide:
-                t = [0, 0] # no shift if it is central slide
+                if self.align_method == 'cc':
+                    t = [0, 0] # no shift if it is central slide
+                elif self.align_method == 'flirt':
+                    t = np.eye(4)
             else:
+                img = get_image(self.slides_dict, sl) 
                 if sl < self.ref_slide:
                     tgt = get_image(self.slides_dict, sl+1)
                 else:
                     tgt = get_image(self.slides_dict, sl-1)
-                t  = calc_shift(img, tgt, self.ref_shape)
-                # don't worry about small shifts
-                t[0] = t[0] if np.abs(t[0])>thr else 0.
-                t[1] = t[1] if np.abs(t[1])>thr else 0.
+                if self.align_method == 'cc':
+                    t  = calc_shift(img, tgt, self.ref_shape)
+                    # don't worry about small shifts
+                    t[0] = t[0] if np.abs(t[0])>thr else 0.
+                    t[1] = t[1] if np.abs(t[1])>thr else 0.
+                elif self.align_method == 'flirt':
+                    t = calc_flirt(img, tgt, self.ref_shape)
             # Store shifts
             self.rel_shifts[sl] = t
             if self.verbose:
                 print('\t\t', sl, self.rel_shifts[sl])
-        # # convert arrays to dictionaries
-        # self.rel_shifts = {int(k): v.tolist() for k, v in zip(slides, rel_shifts)}
         # Calculate absolute shifts
         self._calc_total_shift(self.rel_shifts)
 
     def _calc_total_shift(self, rel_shifts_dict):
-        for sl in rel_shifts_dict.keys():
-            self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
-                                                  self.ref_slide, first_slide=self.slide_range[0])
+        if self.align_method == 'cc':
+            for sl in rel_shifts_dict.keys():
+                self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
+                                                    self.ref_slide, first_slide=self.slide_range[0])
+        elif self.align_method == 'flirt':
+            slides = sorted(list(self.slides_dict.keys()))
+            self.abs_shifts = {self.ref_slide: np.eye(4)}
+            # left side: propagate forward
+            for sl in range(self.ref_slide-1, slides[0]-1, -1):
+                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl+1]
+
+            # right side: propagate backward
+            for sl in range(self.ref_slide+1, slides[-1]+1):
+                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl-1]
+            
+            # sort the shifts by slide number
+            self.abs_shifts = dict(sorted(self.abs_shifts.items()))
+
+            # for sl in rel_shifts_dict.keys():
+            #     self.abs_shifts[sl] = get_total_mat(np.array(list(rel_shifts_dict.values())), sl, 
+            #                                         self.ref_slide, first_slide=self.slide_range[0])
+        else:
+            raise ValueError(f"Alignment method '${self.align_method}' is not recognised.")
 
     # Function to be called and "automate" the registration steps
     def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False):
@@ -310,8 +349,10 @@ class psoct:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        self.align(ref=align_ref, thr=align_thr)
-        if plot_alignment:
+        # TODO expose alignment method to input options?
+        self.align(method='cc', ref=align_ref, thr=align_thr)
+        # TODO update plots to support flirt outputs
+        if plot_alignment and self.align_method == 'cc':
             plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
             plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
         if self.verbose:
@@ -320,10 +361,21 @@ class psoct:
 
     def _create_slide_deck(self, downsample=1, applyshift=True):
         slide_deck = []
+        # we assume that abs_shifts are sorted by slide number
         for sl in self.abs_shifts.keys():
             img_padded = pad_image(get_image(self.slides_dict, sl), self.ref_shape)
             if applyshift:
-                img_padded = shift(img_padded, self.abs_shifts[sl])
+                if self.align_method == 'cc':
+                    img_padded = shift(img_padded, self.abs_shifts[sl])
+                elif self.align_method == 'flirt':
+                    src_filename = 'tmp_padded_source.nii.gz'
+                    save_nifti(img_padded, src_filename)
+                    img_padded = applyxfm(src_filename,
+                                          self.slides_dict[self.ref_slide],
+                                          self.abs_shifts[sl],
+                                          LOAD, twod=True)
+                    img_padded = img_padded['out'].get_fdata()
+                    Path.unlink(src_filename)
             slide_deck.append(img_padded[::downsample,::downsample])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
@@ -483,7 +535,15 @@ class psoct:
                 # Zero-pad and shift
                 highres_shape = [x * self.downsample for x in self.ref_shape]
                 img_padded    = pad_image(img_highres, highres_shape)
-                img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
+                # img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
+                src_filename  = 'tmp_padded_source.nii.gz'
+                save_nifti(img_padded, src_filename)
+                img_zp_shift  = applyxfm(src_filename,
+                                 self.slides_dict[self.ref_slide],
+                                 self.abs_shifts[sl] * self.downsample,
+                                 LOAD, twod=True)
+                img_zp_shift  = img_zp_shift['out'].get_fdata()
+                Path.unlink(src_filename)
                 
                 if self.orientation == 'sagittal':
                     newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
@@ -535,8 +595,36 @@ class psoct:
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
-        self.apply_to_highres_images(indiv_slides, other_images)
+        # self.apply_to_highres_images(indiv_slides, other_images)
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
         return indiv_slides
+    
+    # Function to be called for flirt version of the pipeline
+    def run_pipeline(self, other_images, output_path, mri_ref, downsample=1, bad_slides=None, align_ref='centre', plot_alignment=False):
+        if self.verbose:
+            print('\nStarting slide registration process ...')
+        self.label_bad_slides(indices=bad_slides)
+        self.interpolate_missing_slides()
+        # TODO expose alignment method to input options?
+        slide_deck = self.align(method='flirt',ref=align_ref)
+        if self.verbose:
+            print('Slide registration completed.')
+        if self.verbose:
+            print('\nStarting slide deck creation ...')
+        mri_ref = Path(mri_ref)
+        # TODO consider moving the next two lines into apply_registration
+        self.output_path = Path(output_path)
+        os.makedirs(self.output_path, exist_ok=True)
+        # save shifts to a text file
+        self._save_shifts()
+        # save slide decks and header information
+        self.apply_registration(output_name='slide_deck', downsample=downsample)
+        # # matfile, _ = self.align_mri_to_psoct(mri_ref)
+        # # psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
+        # # indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
+        # # self.apply_to_highres_images(indiv_slides, other_images)
+        # if self.verbose:
+        #     print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
+        # return indiv_slides
     

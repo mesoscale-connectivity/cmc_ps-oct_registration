@@ -55,8 +55,8 @@ def parse_cli_args():
     parser.add_argument('--seq_params',       type=str, required=True, help="Path to PSOCT sequence parameters' JSON file")
     parser.add_argument('--mri_ref',          type=str, required=True, help="Reference MRI NIfTI file for alignment")
     parser.add_argument('--reg_modality',     type=str, required=True, choices=['Retardance', 'Cross', 'Orientation'], help="The PSOCT modality to be used for alignment")
-    parser.add_argument('--other_images',     type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
     
+    parser.add_argument('--other_images',     type=str, default=[], nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
     parser.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
     # parser.add_argument('--non-linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     parser.add_argument('--slide_range', type=int, nargs=2, default=None, help="Range of slides to process (start end)")

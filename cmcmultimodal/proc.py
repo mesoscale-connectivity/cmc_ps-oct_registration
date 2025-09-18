@@ -9,6 +9,7 @@ Copyright (C) 2025 University of Oxford
 '''
 
 import os
+import json
 import numpy as np
 from pathlib import Path
 
@@ -240,21 +241,35 @@ class psoct:
         # Find all slides that have max size and take the median as the central slide
         max_indices = np.where(all_sizes == np.max(all_sizes))[0]
         central_slide_num = all_slides[round(np.median(max_indices))]
-        # Get the shape of the central slide
-        central_slide_shape = get_image(self.slides_dict, central_slide_num).shape
-        return central_slide_num, central_slide_shape
+        return central_slide_num
+    
+    def _find_max_shape(self):
+        # Independent function to find the max shape across slides, irrespective of zeroes
+        # Find the size of each slide (excluding the interpolated ones)
+        all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
+        max_size = 0
+        idx = None
+        for slide in range(len(all_slides)):
+            size = np.prod(get_image(self.slides_dict, all_slides[slide]).shape)
+            if size > max_size:
+                max_size = size
+                idx = slide
+        if idx is None:
+            raise ValueError("All input images have zero size!")
+        else:
+            max_slide_shape = get_image(self.slides_dict, all_slides[idx]).shape
+        return max_slide_shape
     
     def _get_ref_slide(self, ref):
         if ref == 'centre':
-            ref_slide, ref_shape = self._find_central_slide()
+            ref_slide = self._find_central_slide()
         elif ref == 'first':
             ref_slide = np.min(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, ref_slide).shape
         elif ref == 'last':
             ref_slide = np.max(list(self.slides_dict.keys()))
-            ref_shape = get_image(self.slides_dict, ref_slide).shape
         else:
             raise ValueError(f'Unexpected reference method {ref} for alignment.')
+        ref_shape = self._find_max_shape()
         return ref_slide, ref_shape
 
     def align(self, ref='centre', thr=0):
@@ -272,7 +287,6 @@ class psoct:
             print(f"\tReference slide for alignment: {self.ref_slide}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
-        # rel_shifts = np.zeros((len(slides), 2))
         # TODO for interpolated_slides the alignment could be skipped?
         if self.verbose:
             print('\tRelative alignment values:')
@@ -280,7 +294,7 @@ class psoct:
         # Get image from dataframe
             img = get_image(self.slides_dict, sl) 
             if sl == self.ref_slide:
-                t = [0, 0] # no shift if it is central slide
+                t = np.array([0, 0]) # no shift if it is central slide
             else:
                 if sl < self.ref_slide:
                     tgt = get_image(self.slides_dict, sl+1)
@@ -294,8 +308,7 @@ class psoct:
             self.rel_shifts[sl] = t
             if self.verbose:
                 print('\t\t', sl, self.rel_shifts[sl])
-        # # convert arrays to dictionaries
-        # self.rel_shifts = {int(k): v.tolist() for k, v in zip(slides, rel_shifts)}
+
         # Calculate absolute shifts
         self._calc_total_shift(self.rel_shifts)
 
@@ -512,12 +525,10 @@ class psoct:
                 print(f"\tRegistration of '{mod}' slides completed.")
     
     def _save_shifts(self):
-        with open(self.output_path / 'abs_shifts.txt', "w") as f:
-            for k, v in self.abs_shifts.items():
-                f.write(f"{k}: {v}\n")
-        with open(self.output_path / 'rel_shifts.txt', "w") as f:
-            for k, v in self.rel_shifts.items():
-                f.write(f"{k}: {v}\n")
+        with open(self.output_path / "abs_shifts.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.abs_shifts.items()}, f)
+        with open(self.output_path / "rel_shifts.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.rel_shifts.items()}, f)
         if self.verbose:
             print('\tRelative and absolute shifts saved.')
 

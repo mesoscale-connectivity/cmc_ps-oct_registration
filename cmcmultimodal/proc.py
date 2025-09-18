@@ -11,6 +11,7 @@ Copyright (C) 2025 University of Oxford
 import os
 import numpy as np
 from pathlib import Path
+import json
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
                                    plot_shifts, pad_image, calc_flirt, get_total_mat
@@ -544,7 +545,7 @@ class psoct:
                                  LOAD, twod=True)
                 img_zp_shift  = img_zp_shift['out'].get_fdata()
                 Path.unlink(src_filename)
-                
+
                 if self.orientation == 'sagittal':
                     newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
                 elif self.orientation == 'coronal':
@@ -572,12 +573,16 @@ class psoct:
                 print(f"\tRegistration of '{mod}' slides completed.")
     
     def _save_shifts(self):
-        with open(self.output_path / 'abs_shifts.txt', "w") as f:
-            for k, v in self.abs_shifts.items():
-                f.write(f"{k}: {v}\n")
-        with open(self.output_path / 'rel_shifts.txt', "w") as f:
-            for k, v in self.rel_shifts.items():
-                f.write(f"{k}: {v}\n")
+        # with open(self.output_path / 'abs_shifts.txt', "w") as f:
+        #     for k, v in self.abs_shifts.items():
+        #         f.write(f"{k}: {v}\n")
+        with open(self.output_path / "abs_shifts.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.abs_shifts.items()}, f)
+        # with open(self.output_path / 'rel_shifts.txt', "w") as f:
+        #     for k, v in self.rel_shifts.items():
+        #         f.write(f"{k}: {v}\n")
+        with open(self.output_path / "rel_shifts.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.rel_shifts.items()}, f)
         if self.verbose:
             print('\tRelative and absolute shifts saved.')
 
@@ -620,11 +625,11 @@ class psoct:
         self._save_shifts()
         # save slide decks and header information
         self.apply_registration(output_name='slide_deck', downsample=downsample)
-        # # matfile, _ = self.align_mri_to_psoct(mri_ref)
-        # # psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
-        # # indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
-        # # self.apply_to_highres_images(indiv_slides, other_images)
-        # if self.verbose:
-        #     print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
-        # return indiv_slides
+        matfile, _ = self.align_mri_to_psoct(mri_ref)
+        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
+        indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
+        self.apply_to_highres_images(indiv_slides, other_images)
+        if self.verbose:
+            print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
+        return indiv_slides
     

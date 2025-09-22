@@ -12,6 +12,7 @@ import os
 import json
 import numpy as np
 from pathlib import Path
+import nibabel as nib
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
                                    plot_shifts, pad_image
@@ -373,15 +374,18 @@ class psoct:
             voxdim = [lr_pixel_down, lr_pixel_down, slice_thickness]
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
-        matrix = np.eye(4)
-        for i in range(3):
-            matrix[i,i] = voxdim[i]
+        matrix = np.diag([*voxdim, 1])
+        # Create appropriate Nifti header
+        hdr = nib.Nifti1Header()
+        hdr.set_xyzt_units(xyz='mm', t='sec')
+        hdr.set_sform(matrix, code=2)
+        hdr.set_qform(matrix, code=2)
 
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
         slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
-        self.slide_deck_img = Image(slide_deck, xform=matrix)
+        self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
         if output_name is not None:
             self.slide_deck_img.save(self.output_path / output_name)
         if self.verbose:

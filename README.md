@@ -23,6 +23,7 @@ python psoct_wrapper.py --inp_path <your_subject_folder>
                         --verbose
 ```
 
+<pre> ```text
 Compulsory arguments:
   -in, --inp_path INP_PATH
                         Input path to PSOCT dataset
@@ -50,6 +51,7 @@ Optional arguments:
                         Downsample factor for the slide deck
   -v, --verbose         Print diagnostic information while running
   -h, --help            show this help message and exit
+``` </pre>
 
 ## Authors and acknowledgment
 (tbd)

@@ -80,7 +80,6 @@ def calc_flirt(src, tgt, shape):
     # Run flirt 2D registration
     out = flirt(src_filename, tgt_filename,
                 omat=LOAD,
-                # out=filename,
                 cost='leastsq',
                 twod=True)
     # Delete temp files
@@ -130,16 +129,3 @@ def get_total_shift(all_shifts, sl, central_slide, first_slide=1):
         return np.sum(all_shifts[sl-first_slide:central_slide-first_slide+1,:], axis=0)
     else:
         return np.sum(all_shifts[central_slide-first_slide:sl-first_slide+1,:], axis=0)
-
-def get_total_mat(all_shifts, sl, central_slide, first_slide=1):
-    """Add flirt matrices all the way to central slide
-    """
-    M = np.eye(4)
-    if sl < central_slide:
-        for mat in all_shifts[sl-first_slide:central_slide-first_slide+1]:
-            M = mat @ M
-    else:
-        for mat in all_shifts[central_slide-first_slide:sl-first_slide+1]:
-            M = mat @ M
-    return M
-    

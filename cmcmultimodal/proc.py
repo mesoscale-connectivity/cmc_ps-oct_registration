@@ -12,9 +12,10 @@ import os
 import numpy as np
 from pathlib import Path
 import json
+import nibabel as nib
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
-                                   plot_shifts, pad_image, calc_flirt, get_total_mat
+                                   plot_shifts, pad_image, calc_flirt
 from scipy.ndimage          import shift
 from fsl.data.image         import Image
 from fsl.wrappers           import flirt, LOAD, applyxfm
@@ -338,9 +339,6 @@ class psoct:
             # sort the shifts by slide number
             self.abs_shifts = dict(sorted(self.abs_shifts.items()))
 
-            # for sl in rel_shifts_dict.keys():
-            #     self.abs_shifts[sl] = get_total_mat(np.array(list(rel_shifts_dict.values())), sl, 
-            #                                         self.ref_slide, first_slide=self.slide_range[0])
         else:
             raise ValueError(f"Alignment method '${self.align_method}' is not recognised.")
 
@@ -413,15 +411,18 @@ class psoct:
             voxdim = [lr_pixel_down, lr_pixel_down, slice_thickness]
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
-        matrix = np.eye(4)
-        for i in range(3):
-            matrix[i,i] = voxdim[i]
+        matrix = np.diag([*voxdim, 1])
+        # Create appropriate Nifti header
+        hdr = nib.Nifti1Header()
+        hdr.set_xyzt_units(xyz='mm', t='sec')
+        hdr.set_sform(matrix, code=2)
+        hdr.set_qform(matrix, code=2)
 
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
         slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
-        self.slide_deck_img = Image(slide_deck, xform=matrix)
+        self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
         if output_name is not None:
             self.slide_deck_img.save(self.output_path / output_name)
         if self.verbose:
@@ -536,15 +537,17 @@ class psoct:
                 # Zero-pad and shift
                 highres_shape = [x * self.downsample for x in self.ref_shape]
                 img_padded    = pad_image(img_highres, highres_shape)
-                # img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
-                src_filename  = 'tmp_padded_source.nii.gz'
-                save_nifti(img_padded, src_filename)
-                img_zp_shift  = applyxfm(src_filename,
-                                 self.slides_dict[self.ref_slide],
-                                 self.abs_shifts[sl] * self.downsample,
-                                 LOAD, twod=True)
-                img_zp_shift  = img_zp_shift['out'].get_fdata()
-                Path.unlink(src_filename)
+                if self.align_method == 'cc':
+                    img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
+                elif self.align_method == 'flirt':
+                    src_filename  = 'tmp_padded_source.nii.gz'
+                    save_nifti(img_padded, src_filename)
+                    img_zp_shift  = applyxfm(src_filename,
+                                    indiv_slides[idx],
+                                    self.abs_shifts[sl],
+                                    LOAD, twod=True)
+                    img_zp_shift  = img_zp_shift['out'].get_fdata()
+                    Path.unlink(src_filename)
 
                 if self.orientation == 'sagittal':
                     newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
@@ -612,7 +615,7 @@ class psoct:
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
         # TODO expose alignment method to input options?
-        slide_deck = self.align(method='flirt',ref=align_ref)
+        self.align(method='flirt',ref=align_ref)
         if self.verbose:
             print('Slide registration completed.')
         if self.verbose:

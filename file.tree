@@ -1,0 +1,12 @@
+MRI
+    reoriented_FA.nii.gz                    (mri_ref)
+PSOCT
+    Cross
+        lowres
+            Slice_{slice}_EnCr.nii.gz       (cross_lowres)
+    Retardance
+        Slice_{slice}_EnR.nii.gz            (ret_highres)
+        lowres
+            Slice_{slice}_EnR.nii.gz        (ret_lowres)
+    Orientation
+        Slice_{slice}_EnO.nii.gz            (or_highres)

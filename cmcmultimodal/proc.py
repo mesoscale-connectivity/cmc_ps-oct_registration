@@ -9,6 +9,7 @@ Copyright (C) 2025 University of Oxford
 '''
 
 import os
+import json
 import numpy as np
 from pathlib import Path
 import json
@@ -297,7 +298,7 @@ class psoct:
             # Get image from dataframe
             if sl == self.ref_slide:
                 if self.align_method == 'cc':
-                    t = [0, 0] # no shift if it is central slide
+                    t = np.array([0, 0]) # no shift if it is central slide
                 elif self.align_method == 'flirt':
                     t = np.eye(4)
             else:
@@ -576,14 +577,8 @@ class psoct:
                 print(f"\tRegistration of '{mod}' slides completed.")
     
     def _save_shifts(self):
-        # with open(self.output_path / 'abs_shifts.txt', "w") as f:
-        #     for k, v in self.abs_shifts.items():
-        #         f.write(f"{k}: {v}\n")
         with open(self.output_path / "abs_shifts.json", "w") as f:
             json.dump({int(k): v.tolist() for k, v in self.abs_shifts.items()}, f)
-        # with open(self.output_path / 'rel_shifts.txt', "w") as f:
-        #     for k, v in self.rel_shifts.items():
-        #         f.write(f"{k}: {v}\n")
         with open(self.output_path / "rel_shifts.json", "w") as f:
             json.dump({int(k): v.tolist() for k, v in self.rel_shifts.items()}, f)
         if self.verbose:

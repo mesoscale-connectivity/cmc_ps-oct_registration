@@ -60,7 +60,7 @@ def calc_shift(src, tgt, shape):
     CC = cross_correlate_2d(src_padded, tgt_padded)
     peak = np.unravel_index(np.argmax(CC, axis=None), CC.shape)
     t    = -peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2
-    return list(t)
+    return np.array(t)
 
 def calc_flirt(src, tgt, shape):
     """Calculate 2D registration that best aligns two images

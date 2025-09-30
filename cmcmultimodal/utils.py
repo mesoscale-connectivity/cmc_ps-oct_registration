@@ -52,7 +52,7 @@ def pad_image(x_template, shape):
 
     return x_template_padded
 
-def calc_shift(src, tgt, shape):
+def calc_shift(src, tgt, shape, thr=0):
     """Calculate 2D translation that best aligns two images
     """
     src_padded = pad_image(src, shape)
@@ -60,21 +60,26 @@ def calc_shift(src, tgt, shape):
     CC = cross_correlate_2d(src_padded, tgt_padded)
     peak = np.unravel_index(np.argmax(CC, axis=None), CC.shape)
     t    = -peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2
+    t[0] = t[0] if np.abs(t[0])>thr else 0.
+    t[1] = t[1] if np.abs(t[1])>thr else 0.
     return np.array(t)
 
 def calc_flirt(src, tgt, shape):
     """Calculate 2D registration that best aligns two images
     """
-    # find the max shape from the two input images
-    shape = tuple(map(max, zip(tgt.shape, src.shape)))
-    # increase max shape by 10% each side
-    shape = tuple(i+min(shape)//5 for i in shape)
+    import tempfile
+    # # find the max shape from the two input images
+    # shape = tuple(map(max, zip(tgt.shape, src.shape)))
+    # # increase max shape by 10% each side
+    # shape = tuple(i+min(shape)//5 for i in shape)
     # Pad input images to get them to the maximum size
     src_padded = pad_image(src, shape)
     tgt_padded = pad_image(tgt, shape)
     # Store the padded images for flirt usage
-    src_filename = 'tmp_padded_source.nii.gz'
-    tgt_filename = 'tmp_padded_target.nii.gz'
+    _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+    _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+    # src_filename = 'tmp_padded_source.nii.gz'
+    # tgt_filename = 'tmp_padded_target.nii.gz'
     save_nifti(src_padded, src_filename)
     save_nifti(tgt_padded, tgt_filename)
     # Run flirt 2D registration

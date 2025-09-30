@@ -24,6 +24,7 @@ from fsl.transform.flirt    import flirtMatrixToSform
 from fsl.wrappers.avwutils  import fslsplit
 import fsl.transform.affine as affine
 from cmcmultimodal.io import save_nifti
+import dask.multiprocessing
 
 # create sentinel object for slide_range
 _UNSET = object()
@@ -294,13 +295,15 @@ class psoct:
         # TODO for interpolated_slides the alignment could be skipped?
         # if self.verbose:
         #     print('\tRelative alignment values:')
+        dask.config.set(scheduler='processes', num_workers = 8)
+        jobs = []
         for sl in slides:
             # Get image from dataframe
             if sl == self.ref_slide:
                 if self.align_method == 'cc':
-                    t = np.array([0, 0]) # no shift if it is central slide
+                    jobs.append(np.array([0, 0]))  # no shift if it is central slide
                 elif self.align_method == 'flirt':
-                    t = np.eye(4)
+                    jobs.append(np.eye(4))
             else:
                 img = get_image(self.slides_dict, sl) 
                 if sl < self.ref_slide:
@@ -308,16 +311,15 @@ class psoct:
                 else:
                     tgt = get_image(self.slides_dict, sl-1)
                 if self.align_method == 'cc':
-                    t  = calc_shift(img, tgt, self.ref_shape)
-                    # don't worry about small shifts
-                    t[0] = t[0] if np.abs(t[0])>thr else 0.
-                    t[1] = t[1] if np.abs(t[1])>thr else 0.
+                    jobs.append(dask.delayed(calc_shift)(img, tgt, self.ref_shape, thr))
+                    # t  = calc_shift(img, tgt, self.ref_shape)
+                    # # don't worry about small shifts
+                    # t[0] = t[0] if np.abs(t[0])>thr else 0.
+                    # t[1] = t[1] if np.abs(t[1])>thr else 0.
                 elif self.align_method == 'flirt':
-                    t = calc_flirt(img, tgt, self.ref_shape)
-            # Store shifts
-            self.rel_shifts[sl] = t
-            if self.verbose:
-                print('\t\t', sl, self.rel_shifts[sl])
+                    jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape))
+        tmp_results = dask.compute(jobs)[0]
+        self.rel_shifts = dict(zip(slides, tmp_results))
         # Calculate absolute shifts
         self._calc_total_shift(self.rel_shifts)
 
@@ -417,7 +419,6 @@ class psoct:
         hdr = nib.Nifti1Header()
         hdr.set_xyzt_units(xyz='mm', t='sec')
         hdr.set_sform(matrix, code=2)
-        hdr.set_qform(matrix, code=2)
 
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
@@ -547,7 +548,7 @@ class psoct:
                                     indiv_slides[idx],
                                     self.abs_shifts[sl],
                                     LOAD, twod=True)
-                    img_zp_shift  = img_zp_shift['out'].get_fdata()
+                    img_zp_shift  = np.squeeze(img_zp_shift['out'].get_fdata())
                     Path.unlink(src_filename)
 
                 if self.orientation == 'sagittal':

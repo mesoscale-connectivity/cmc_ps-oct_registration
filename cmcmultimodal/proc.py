@@ -13,6 +13,7 @@ import json
 import numpy as np
 from pathlib import Path
 import nibabel as nib
+import dask.multiprocessing
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
                                    plot_shifts, pad_image
@@ -379,7 +380,6 @@ class psoct:
         hdr = nib.Nifti1Header()
         hdr.set_xyzt_units(xyz='mm', t='sec')
         hdr.set_sform(matrix, code=2)
-        hdr.set_qform(matrix, code=2)
 
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
@@ -465,7 +465,42 @@ class psoct:
         if not isinstance(other_images, list):
             other_images = [other_images]
         
+        def proc_func(img, highres_file, filename, orientation, downsample, ref_shape, abs_shift):
+            img_lowres  = Image(img)
+            img_highres = Image(highres_file).data[:,:,0]
+
+            # Zero-pad and shift
+            highres_shape = [x * downsample for x in ref_shape]
+            img_padded    = pad_image(img_highres, highres_shape)
+            img_zp_shift  = shift(img_padded, abs_shift * downsample)
+            
+            if orientation == 'sagittal':
+                newShape = [img_lowres.shape[0], img_lowres.shape[1]*downsample, img_lowres.shape[2]*downsample]
+            elif orientation == 'coronal':
+                newShape = [img_lowres.shape[0]*downsample, img_lowres.shape[1], img_lowres.shape[2]*downsample]
+            elif orientation == 'axial':
+                newShape = [img_lowres.shape[0]*downsample, img_lowres.shape[1]*downsample, img_lowres.shape[2]]
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            newShape = np.array(np.round(newShape), dtype=int)
+
+            matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
+            matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
+
+            if orientation == 'sagittal':
+                img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=img_lowres.header)
+            elif orientation == 'coronal':
+                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
+            elif orientation == 'axial':
+                img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=img_lowres.header)
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            os.makedirs(filename.parent, exist_ok=True)
+            img_highres.save(filename)
+
         # run alignment across all modalities
+        dask.config.set(scheduler='processes', num_workers = 8)
+        jobs = []
         for mod in other_images:
             if self.verbose:
                 print(f"\tApplying registration matrix to '{mod}' slides ...")
@@ -484,49 +519,21 @@ class psoct:
                 # skip bad_slides
                 if sl in self.bad_slides:
                     continue
-                
-                img_lowres = Image(indiv_slides[idx])
-                
+                                
                 # Load Image
                 mod_idx = np.where(mod_slide_numbers == sl)[0]
-                if len(mod_idx) != 1 and self.verbose:
-                    print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
+                if len(mod_idx) != 1:
+                    if self.verbose:
+                        print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
                 
                 highres_file = data_files[mod_idx[0]]
                 filename = self.output_path / mod / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
-                img_highres = Image(highres_file).data[:,:,0]
-
-                # Zero-pad and shift
-                highres_shape = [x * self.downsample for x in self.ref_shape]
-                img_padded    = pad_image(img_highres, highres_shape)
-                img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
-                
-                if self.orientation == 'sagittal':
-                    newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
-                elif self.orientation == 'coronal':
-                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
-                elif self.orientation == 'axial':
-                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1]*self.downsample, img_lowres.shape[2]]
-                else:
-                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
-                newShape = np.array(np.round(newShape), dtype=int)
-
-                matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
-                matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
-
-                if self.orientation == 'sagittal':
-                    img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=img_lowres.header)
-                elif self.orientation == 'coronal':
-                    img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
-                elif self.orientation == 'axial':
-                    img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=img_lowres.header)
-                else:
-                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
-                os.makedirs(filename.parent, exist_ok=True)
-                img_highres.save(filename)
-            if self.verbose:
-                print(f"\tRegistration of '{mod}' slides completed.")
+                jobs.append(dask.delayed(proc_func)(indiv_slides[idx], highres_file, filename, self.orientation,
+                                                self.downsample, self.ref_shape, self.abs_shifts[sl]))
+        dask.compute(jobs)
+        if self.verbose:
+            print(f"\tRegistration of '{other_images}' slides completed.")
     
     def _save_shifts(self):
         with open(self.output_path / "abs_shifts.json", "w") as f:

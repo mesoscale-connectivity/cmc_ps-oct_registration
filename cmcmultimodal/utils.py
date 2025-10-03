@@ -59,7 +59,7 @@ def calc_shift(src, tgt, shape, thr=0):
     tgt_padded = pad_image(tgt, shape)
     CC = cross_correlate_2d(src_padded, tgt_padded)
     peak = np.unravel_index(np.argmax(CC, axis=None), CC.shape)
-    t    = -peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2
+    t    = [-peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2]
     t[0] = t[0] if np.abs(t[0])>thr else 0.
     t[1] = t[1] if np.abs(t[1])>thr else 0.
     return np.array(t)

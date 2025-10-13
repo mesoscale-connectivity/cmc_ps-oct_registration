@@ -16,10 +16,13 @@ def _compare_images(ref, est):
     ref_img = Image(ref)
     est_img = Image(est)
 
-    if not np.allclose(ref_img.data, est_img.data):
+    if not ref_img.data.shape == est_img.data.shape:
         print(ref)
-        print('\t', 'Images are NOT equal!')
-    if ref_img.header != est_img.header:
+        print('\t', 'Image size is NOT equal!')
+    elif not np.allclose(ref_img.data, est_img.data):
+        print(ref)
+        print('\t', 'Image data are NOT equal!')
+    elif ref_img.header != est_img.header:
         print(ref)
         print('\t', 'Headers are NOT equal!')
 
@@ -41,7 +44,8 @@ def _compare_json(ref, est):
 
     is_equal = True
     for key in ref_json.keys():
-        if not np.allclose(ref_json[key], est_json[key], atol=0.001):
+        if not ref_json[key].shape == est_json[key].shape or \
+           not np.allclose(ref_json[key], est_json[key], atol=0.001):
             is_equal = False
             break
     if not is_equal:
@@ -59,9 +63,9 @@ def __run_subfile_code(subfile, corresponding_est_file):
         _compare_matrices(subfile, corresponding_est_file)
 
 
-def compare_results_folder(ref_path, est_path):
+def compare_results_folder(ref_path, est_path, subdir=False):
     for file in ref_path.glob('*'):
-        if file.is_dir():
+        if subdir and file.is_dir():
             for subfile in file.glob('*'):
                 if subfile.is_dir():
                     for subsubfile in subfile.glob('*'):

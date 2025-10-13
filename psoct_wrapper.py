@@ -9,6 +9,9 @@ Copyright (C) 2025 University of Oxford
 '''
 
 import argparse
+import sys
+import time
+from datetime import datetime
 import textwrap
 from pathlib import Path
 from cmcmultimodal.proc import psoct
@@ -21,31 +24,28 @@ def run_psoct_pipeline(
     lowres=True,
     slide_range=None,
     bad_slides=None,
+    reg_method='flirt',
     align_ref='centre',
     align_thr=0,
-    plot_alignment=False,
+    plot_alignment=True,
     reg_modality='Retardance',
     reg_downsample=1,
-    other_images=['Retardance', 'Orientation'],
+    other_images=['Retardance', 'Cross'],
     verbose=False):
 
     # Initialize the object
     ps = psoct(inp_path=Path(inp_path), seq_params=seq_params, lowres=lowres, slide_range=slide_range, reg_modality=reg_modality, verbose=verbose)
 
-    # Run registration
-    ps.run_registration(
-        bad_slides=bad_slides,
-        align_ref=align_ref,
-        align_thr=align_thr,
-        plot_alignment=plot_alignment
-    )
-
-    # Create slide deck and apply headers
-    _ = ps.run_slide_deck_creation(
-        other_images=other_images,
-        output_path=out_path,
-        mri_ref=mri_ref,
-        downsample=reg_downsample
+    # Run pipeline
+    _ = ps.run_pipeline(other_images=other_images,
+                        output_path=out_path,
+                        mri_ref=mri_ref,
+                        downsample=reg_downsample,
+                        bad_slides=bad_slides,
+                        reg_method=reg_method,
+                        align_ref=align_ref,
+                        align_thr=align_thr,
+                        plot_alignment=plot_alignment
     )
 
 def parse_cli_args():
@@ -71,6 +71,7 @@ def parse_cli_args():
     # ---- Optional arguments group ----
     optional = parser.add_argument_group("Optional arguments")
     optional.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
+    required.add_argument('--reg_method',  type=str, default='flirt', choices=['flirt', 'cc'], help="The registration method for within-slide alignment")
     # optional.add_argument('--non-linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     optional.add_argument('--slide_range', type=int, nargs=2, default=None, help="Range of slides to process (start end)")
     optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, help="List of bad slide numbers to skip")
@@ -86,6 +87,9 @@ def parse_cli_args():
 
 
 if __name__ == '__main__':
+    start_time = time.time()
+    start_dt = datetime.now()
+    # read argument and execute code
     args = parse_cli_args()
     # TODO propagate the non-linear flag when implemented
     run_psoct_pipeline(
@@ -96,6 +100,7 @@ if __name__ == '__main__':
         lowres=(not args.highres),
         slide_range=tuple(args.slide_range) if args.slide_range else None,
         bad_slides=args.bad_slides,
+        reg_method=args.reg_method,
         align_ref=args.align_ref,
         align_thr=args.align_thr,
         # plot_alignment=args.plot_alignment,
@@ -104,3 +109,10 @@ if __name__ == '__main__':
         other_images = args.other_images,
         verbose=args.verbose
     )
+    # store command line in txt file
+    end_time = time.time()
+    cmd = " ".join(sys.argv)
+    with open(args.out_path + "/command_log.txt", "a") as f:
+        f.write(f"[{start_dt.isoformat()}] {cmd}\n"
+                f"→ Duration: {(end_time-start_time):.2f}s\n"
+        )

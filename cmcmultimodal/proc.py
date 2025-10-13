@@ -349,22 +349,6 @@ class psoct:
         else:
             raise ValueError(f"Alignment method '${self.align_method}' is not recognised.")
 
-    # Function to be called and "automate" the registration steps
-    def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False):
-        if self.verbose:
-            print('\nStarting slide registration process ...')
-        self.label_bad_slides(indices=bad_slides)
-        self.interpolate_missing_slides()
-        # TODO expose alignment method to input options?
-        self.align(method='cc', ref=align_ref, thr=align_thr)
-        # TODO update plots to support flirt outputs
-        if plot_alignment and self.align_method == 'cc':
-            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
-            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
-        if self.verbose:
-            print('Slide registration completed.')
-    
-
     def _create_slide_deck(self, downsample=1, applyshift=True):
         slide_deck = []
         # we assume that abs_shifts are sorted by slide number
@@ -402,7 +386,7 @@ class psoct:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
         return slide_deck
     
-    def apply_registration(self, output_name=None, downsample=1):
+    def apply_registration(self, downsample=1):
         # TODO add this in a separate function?
         # Include pixel dimension in the header
         orig_pixel      = self.seq_params['in-plane resolution']
@@ -429,8 +413,8 @@ class psoct:
         slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
-        if output_name is not None:
-            self.slide_deck_img.save(self.output_path / output_name)
+        output_name = self.reg_modality[:3] + '_slide_deck'
+        self.slide_deck_img.save(self.output_path / output_name)
         if self.verbose:
             print('Done.')
 
@@ -443,8 +427,9 @@ class psoct:
         else:
             mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
         mri_img = Image(mri_ref_fullpath)
-        matfile = self.output_path / 'mri_to_slides.mat'
-        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
+        matfile = self.output_path / 'MRI_to_PSOCT.mat'
+        # TODO this assumes the input has the .nii.gz suffix
+        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_in_PSOCT')
         if self.verbose:
             print('\tRunning MRI-to-PSOCT registration ...', end=' ')
         flirt(src=mri_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
@@ -455,7 +440,7 @@ class psoct:
     def align_psoct_to_mri(self, matfile, mri_ref):
         mat     = np.loadtxt(matfile)
         mat_inv = np.linalg.inv(mat)
-        outfile = self.output_path / 'slide_deck_to_mri'
+        outfile = self.output_path / (self.reg_modality[:3] + '_slide_deck_in_MRI')
         if mri_ref.is_absolute():
             mri_ref_fullpath = mri_ref
         else:
@@ -464,7 +449,7 @@ class psoct:
         xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
         slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
         slide_img_hdr.save(outfile)
-        np.savetxt(self.output_path / 'slides_to_mri.mat', mat_inv, fmt='%.10f', delimiter=' ')
+        np.savetxt(self.output_path / 'PSOCT_to_MRI.mat', mat_inv, fmt='%.10f', delimiter=' ')
         
         return outfile
 
@@ -568,6 +553,8 @@ class psoct:
             
             dask.config.set(scheduler='processes', num_workers = NUM_CORES)
             jobs = []
+            if self.verbose:
+                print(f"\tApplying registration matrix to '{mod}' slides ...")
             for sl, idx in zip(slide_numbers, split_numbers):
                 # skip bad_slides
                 if sl in self.bad_slides:
@@ -587,8 +574,6 @@ class psoct:
             
                 jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl], 
                                                 self.downsample, ref_img.header, self.align_method, self.orientation))
-            if self.verbose:
-                print(f"\tApplying registration matrix to '{mod}' slides ...")
             dask.compute(jobs)
             if self.verbose:
                 print(f"\tRegistration of '{mod}' slides completed.")
@@ -683,33 +668,28 @@ class psoct:
         if self.verbose:
             print('\tRelative and absolute shifts saved.')
 
-    def run_slide_deck_creation(self, other_images, output_path, mri_ref, downsample=1):
-        if self.verbose:
-            print('\nStarting slide deck creation ...')
-        mri_ref = Path(mri_ref)
-        # TODO consider moving the next two lines into apply_registration
-        self.output_path = Path(output_path)
-        os.makedirs(self.output_path, exist_ok=True)
-        # save shifts to a text file
-        self._save_shifts()
-        # save slide decks and header information
-        self.apply_registration(output_name='slide_deck', downsample=downsample)
-        matfile, _ = self.align_mri_to_psoct(mri_ref)
-        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
-        indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
-        # self.apply_to_highres_images(indiv_slides, other_images)
-        if self.verbose:
-            print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
-        return indiv_slides
     
     # Function to be called for flirt version of the pipeline
-    def run_pipeline(self, other_images, output_path, mri_ref, downsample=1, bad_slides=None, align_ref='centre', plot_alignment=False):
+    def run_pipeline(self, 
+                     other_images, 
+                     output_path, 
+                     mri_ref, 
+                     downsample=1, 
+                     bad_slides=None, 
+                     reg_method='flirt', 
+                     align_ref='centre', 
+                     align_thr=0, 
+                     plot_alignment=False
+        ):
         if self.verbose:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
         # TODO expose alignment method to input options?
-        self.align(method='flirt',ref=align_ref)
+        self.align(method=reg_method, ref=align_ref, thr=align_thr)
+        if plot_alignment and reg_method == 'cc':
+            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
+            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
         if self.verbose:
             print('Slide registration completed.')
         if self.verbose:
@@ -721,7 +701,7 @@ class psoct:
         # save shifts to a text file
         self._save_shifts()
         # save slide decks and header information
-        self.apply_registration(output_name='slide_deck', downsample=downsample)
+        self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)

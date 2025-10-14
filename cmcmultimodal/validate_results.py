@@ -17,22 +17,18 @@ def _compare_images(ref, est):
     est_img = Image(est)
 
     if not ref_img.data.shape == est_img.data.shape:
-        print(ref)
-        print('\t', 'Image size is NOT equal!')
+        print('-', ref.name, ': Image size is NOT equal!')
     elif not np.allclose(ref_img.data, est_img.data):
-        print(ref)
-        print('\t', 'Image data are NOT equal!')
+        print('-', ref.name, ': Image data are NOT equal!')
     elif ref_img.header != est_img.header:
-        print(ref)
-        print('\t', 'Headers are NOT equal!')
+        print('-', ref.name, ': Headers are NOT equal!')
 
 def _compare_matrices(ref, est):
     ref_mat = np.loadtxt(ref)
     est_mat = np.loadtxt(est)
 
     if not np.allclose(ref_mat, est_mat, atol=0.001):
-        print(ref)
-        print('\t', 'Matrices are NOT equal!')
+        print('-', ref.name, ': Matrices are NOT equal!')
 
 def _compare_json(ref, est):
     with open(ref) as f:
@@ -49,13 +45,11 @@ def _compare_json(ref, est):
             is_equal = False
             break
     if not is_equal:
-        print(ref)
-        print('\t', 'JSON files are NOT equal!')
+        print('-', ref.name, ': JSON files are NOT equal!')
 
 def __run_subfile_code(subfile, corresponding_est_file):
     if corresponding_est_file.exists() == False:
-        print(subfile)
-        print('\t', 'File does not exist in estimated path!')
+        print('-', subfile.name, ': File does not exist in estimated path!')
         return
     if subfile.suffix in ['.nii', '.gz']:
         _compare_images(subfile, corresponding_est_file)
@@ -77,8 +71,7 @@ def compare_results_folder(ref_path, est_path, subdir=False):
         else:
             corresponding_est_file = est_path / file.name
             if corresponding_est_file.exists() == False:
-                print(file)
-                print('\t', 'File does not exist in estimated path!')
+                print('-', file.name, ': File does not exist in estimated path!')
                 continue
             if file.suffix in ['.nii', '.gz']:
                 _compare_images(file, corresponding_est_file)

@@ -19,7 +19,7 @@ from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
                                    plot_shifts, pad_image, calc_flirt
 from scipy.ndimage          import shift
 from fsl.data.image         import Image
-from fsl.wrappers           import flirt, LOAD, applyxfm
+from fsl.wrappers           import flirt, fnirt, LOAD, applyxfm
 from fsl.transform.flirt    import flirtMatrixToSform
 from fsl.wrappers.avwutils  import fslsplit
 import fsl.transform.affine as affine
@@ -418,7 +418,6 @@ class psoct:
         if self.verbose:
             print('Done.')
 
-    # TODO add fnirt option
     def align_mri_to_psoct(self, mri_ref):
         # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
@@ -437,19 +436,32 @@ class psoct:
             print('Done.')
         return matfile, outfile
     
-    def align_psoct_to_mri(self, matfile, mri_ref):
-        mat     = np.loadtxt(matfile)
-        mat_inv = np.linalg.inv(mat)
-        outfile = self.output_path / (self.reg_modality[:3] + '_slide_deck_in_MRI')
+    def align_psoct_to_mri(self, matfile, mri_ref, nonlinear=False):
+        # invert and save tranformation matrix
+        mat      = np.loadtxt(matfile)
+        mat_inv  = np.linalg.inv(mat)
+        mat_file = self.output_path / 'PSOCT_to_MRI.mat'
+        np.savetxt(mat_file, mat_inv, fmt='%.10f', delimiter=' ')
+
         if mri_ref.is_absolute():
             mri_ref_fullpath = mri_ref
         else:
             mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
 
-        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
-        slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
-        slide_img_hdr.save(outfile)
-        np.savetxt(self.output_path / 'PSOCT_to_MRI.mat', mat_inv, fmt='%.10f', delimiter=' ')
+        if self.verbose:
+            print('\tRunning PSOCT-to-MRI registration ...', end=' ')
+        
+        # perform alignment
+        outfile = self.output_path / (self.reg_modality[:3] + '_slide_deck_in_MRI')
+        if nonlinear:
+            fnirt(src=self.slide_deck_img, ref=mri_ref, iout=outfile, aff=mat_file, config='data/fnirt_config', verbose=self.verbose)
+        else:
+            xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
+            slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
+            slide_img_hdr.save(outfile)
+
+        if self.verbose:
+            print('Done.')
         
         return outfile
 
@@ -670,22 +682,22 @@ class psoct:
 
     
     # Function to be called for flirt version of the pipeline
-    def run_pipeline(self, 
-                     other_images, 
-                     output_path, 
-                     mri_ref, 
-                     downsample=1, 
-                     bad_slides=None, 
-                     reg_method='flirt', 
-                     align_ref='centre', 
-                     align_thr=0, 
+    def run_pipeline(self,
+                     other_images,
+                     output_path,
+                     mri_ref,
+                     downsample=1,
+                     bad_slides=None,
+                     reg_method='flirt',
+                     fnirt=False,
+                     align_ref='centre',
+                     align_thr=0,
                      plot_alignment=False
         ):
         if self.verbose:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
-        # TODO expose alignment method to input options?
         self.align(method=reg_method, ref=align_ref, thr=align_thr)
         if plot_alignment and reg_method == 'cc':
             plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
@@ -703,7 +715,7 @@ class psoct:
         # save slide decks and header information
         self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
-        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
+        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref, fnirt)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
         self.apply_to_lowres_images(indiv_slides, other_images)
         # self.apply_to_highres_images(indiv_slides, other_images)

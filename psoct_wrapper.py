@@ -25,9 +25,10 @@ def run_psoct_pipeline(
     slide_range=None,
     bad_slides=None,
     reg_method='flirt',
+    fnirt=False,
     align_ref='centre',
     align_thr=0,
-    plot_alignment=True,
+    plot_alignment=False,
     reg_modality='Retardance',
     reg_downsample=1,
     other_images=['Retardance', 'Cross'],
@@ -43,6 +44,7 @@ def run_psoct_pipeline(
                         downsample=reg_downsample,
                         bad_slides=bad_slides,
                         reg_method=reg_method,
+                        fnirt=fnirt,
                         align_ref=align_ref,
                         align_thr=align_thr,
                         plot_alignment=plot_alignment
@@ -72,7 +74,7 @@ def parse_cli_args():
     optional = parser.add_argument_group("Optional arguments")
     optional.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
     required.add_argument('--reg_method',  type=str, default='flirt', choices=['flirt', 'cc'], help="The registration method for within-slide alignment")
-    # optional.add_argument('--non-linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
+    optional.add_argument('--non_linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     optional.add_argument('--slide_range', type=int, nargs=2, default=None, help="Range of slides to process (start end)")
     optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, help="List of bad slide numbers to skip")
 
@@ -101,6 +103,7 @@ if __name__ == '__main__':
         slide_range=tuple(args.slide_range) if args.slide_range else None,
         bad_slides=args.bad_slides,
         reg_method=args.reg_method,
+        fnirt=args.non_linear,
         align_ref=args.align_ref,
         align_thr=args.align_thr,
         # plot_alignment=args.plot_alignment,

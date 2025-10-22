@@ -14,6 +14,7 @@ import numpy as np
 from pathlib import Path
 import json
 import nibabel as nib
+import tempfile
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
                                    plot_shifts, pad_image, calc_flirt
@@ -358,14 +359,19 @@ class psoct:
                 if self.align_method == 'cc':
                     img_padded = shift(img_padded, self.abs_shifts[sl])
                 elif self.align_method == 'flirt':
-                    src_filename = 'tmp_padded_source.nii.gz'
+                    _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
                     save_nifti(img_padded, src_filename)
+                    _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                    img_padded = pad_image(get_image(self.slides_dict, self.ref_slide), self.ref_shape)
+                    save_nifti(img_padded, tgt_filename)
                     img_padded = applyxfm(src_filename,
-                                          self.slides_dict[self.ref_slide],
+                                          tgt_filename,
                                           self.abs_shifts[sl],
-                                          LOAD, twod=True)
+                                          LOAD,
+                                          twod=True)
                     img_padded = img_padded['out'].get_fdata()
                     Path.unlink(src_filename)
+                    Path.unlink(tgt_filename)
             slide_deck.append(img_padded[::downsample,::downsample])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
@@ -519,25 +525,28 @@ class psoct:
             return
         
         # run alignment across all modalities
-        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, downsample, header, align_method, orientation):
-            import tempfile
-            tgt_img = Image(file).data[:,:,0]
+        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, header, align_method, orientation):
+            img = Image(file).data[:,:,0]
             # Zero-pad and shift
-            img_padded = pad_image(tgt_img, ref_shape)
+            img_padded = pad_image(img, ref_shape)
             if align_method == 'cc':
-                img_zp_shift  = shift(img_padded, abs_shift * downsample)
+                img_zp_shift  = shift(img_padded, abs_shift)
             elif align_method == 'flirt':
                 _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
-                _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
                 save_nifti(img_padded, src_filename)
-                img_zp_shift  = applyxfm(src_filename,
-                                ref_slide,
-                                abs_shift,
-                                tgt_filename,
-                                twod=True)
-                img_zp_shift  = np.squeeze(Image(tgt_filename).data)
+                _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                save_nifti(img_padded, tgt_filename)
+                _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
+                img_zp_shift = applyxfm(src_filename,
+                                        tgt_filename,
+                                        abs_shift,
+                                        out_filename,
+                                        twod=True)
+                img_zp_shift = np.squeeze(Image(out_filename).data)
                 Path.unlink(src_filename)
                 Path.unlink(tgt_filename)
+                Path.unlink(out_filename)
 
             if orientation == 'sagittal':
                 tgt_img = Image(img_zp_shift[None,:,:], header=header)
@@ -566,7 +575,7 @@ class psoct:
             dask.config.set(scheduler='processes', num_workers = NUM_CORES)
             jobs = []
             if self.verbose:
-                print(f"\tApplying registration matrix to '{mod}' slides ...")
+                print(f"\tApplying registration matrix to lowres '{mod}' slides ...")
             for sl, idx in zip(slide_numbers, split_numbers):
                 # skip bad_slides
                 if sl in self.bad_slides:
@@ -582,10 +591,9 @@ class psoct:
                 ref_img = Image(indiv_slides[idx])
                 file = data_files[mod_idx[0]]
                 filename = self.output_path / mod / 'lowres' / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
-      
-            
+
                 jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl], 
-                                                self.downsample, ref_img.header, self.align_method, self.orientation))
+                                                     ref_img.header, self.align_method, self.orientation))
             dask.compute(jobs)
             if self.verbose:
                 print(f"\tRegistration of '{mod}' slides completed.")
@@ -597,13 +605,64 @@ class psoct:
         # convert other_images to a list if not already
         if not isinstance(other_images, list):
             other_images = [other_images]
+
+        # run alignment across all modalities
+        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, downsample, ref_img, align_method, orientation):
+            ref_img = Image(ref_img)
+            tgt_img = Image(file).data[:,:,0]
+            # Zero-pad and shift
+            ref_shape = [x * downsample for x in ref_shape]
+            img_padded = pad_image(tgt_img, ref_shape)
+            if align_method == 'cc':
+                img_zp_shift  = shift(img_padded, abs_shift * downsample)
+            elif align_method == 'flirt':
+                _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+                save_nifti(img_padded, src_filename)
+                _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                save_nifti(img_padded, tgt_filename)
+                _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
+                # TODO review if all three axes is correct here or needs just two
+                abs_shift[0:3,-1] = abs_shift[0:3,-1] * downsample
+                img_zp_shift = applyxfm(src_filename,
+                                        tgt_filename,
+                                        abs_shift,
+                                        out_filename,
+                                        twod=True)
+                img_zp_shift = np.squeeze(Image(out_filename).data)
+                Path.unlink(src_filename)
+                Path.unlink(tgt_filename)
+                Path.unlink(out_filename)
+
+            if orientation == 'sagittal':
+                newShape = [ref_img.shape[0], ref_img.shape[1]*downsample, ref_img.shape[2]*downsample]
+            elif orientation == 'coronal':
+                newShape = [ref_img.shape[0]*downsample, ref_img.shape[1], ref_img.shape[2]*downsample]
+            elif orientation == 'axial':
+                newShape = [ref_img.shape[0]*downsample, ref_img.shape[1]*downsample, ref_img.shape[2]]
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            
+            newShape = np.array(np.round(newShape), dtype=int)
+            matrix = affine.rescale(ref_img.shape, newShape, 'centre')
+            matrix = affine.concat(ref_img.voxToWorldMat, matrix)
+
+            if orientation == 'sagittal':
+                img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=ref_img.header)
+            elif orientation == 'coronal':
+                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=ref_img.header)
+            elif orientation == 'axial':
+                img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=ref_img.header)
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            os.makedirs(filename.parent, exist_ok=True)
+            img_highres.save(filename)
         
         # run alignment across all modalities
         for mod in other_images:
-            if self.verbose:
-                print(f"\tApplying registration matrix to '{mod}' slides ...")
+            # Skip registration modality
             if self.slide_res == 'highres' and mod == self.reg_modality:
-                return
+                continue
 
             data_path = self.inp_path.parent / mod
             data_files = sorted(data_path.glob('Slice_*_En*.nii.gz'))
@@ -613,13 +672,15 @@ class psoct:
             slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
             split_numbers = sorted(list(indiv_slides.keys()))
             
+            dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+            jobs = []
+            if self.verbose:
+                print(f"\tApplying registration matrix to highres '{mod}' slides ...")
             for sl, idx in zip(slide_numbers, split_numbers):
                 # skip bad_slides
                 if sl in self.bad_slides:
                     continue
-                
-                img_lowres = Image(indiv_slides[idx])
-                
+                                
                 # Load Image
                 mod_idx = np.where(mod_slide_numbers == sl)[0]
                 if len(mod_idx) != 1:
@@ -627,48 +688,13 @@ class psoct:
                         print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
                 
-                highres_file = data_files[mod_idx[0]]
-                filename = self.output_path / mod / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
-                img_highres = Image(highres_file).data[:,:,0]
+                # ref_img = Image(indiv_slides[idx])
+                file = data_files[mod_idx[0]]
+                filename = self.output_path / mod / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
 
-                # Zero-pad and shift
-                highres_shape = [x * self.downsample for x in self.ref_shape]
-                img_padded    = pad_image(img_highres, highres_shape)
-                if self.align_method == 'cc':
-                    img_zp_shift  = shift(img_padded, self.abs_shifts[sl] * self.downsample)
-                elif self.align_method == 'flirt':
-                    src_filename  = 'tmp_padded_source.nii.gz'
-                    save_nifti(img_padded, src_filename)
-                    img_zp_shift  = applyxfm(src_filename,
-                                    indiv_slides[idx],
-                                    self.abs_shifts[sl],
-                                    LOAD, twod=True)
-                    img_zp_shift  = np.squeeze(img_zp_shift['out'].get_fdata())
-                    Path.unlink(src_filename)
-
-                if self.orientation == 'sagittal':
-                    newShape = [img_lowres.shape[0], img_lowres.shape[1]*self.downsample, img_lowres.shape[2]*self.downsample]
-                elif self.orientation == 'coronal':
-                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1], img_lowres.shape[2]*self.downsample]
-                elif self.orientation == 'axial':
-                    newShape = [img_lowres.shape[0]*self.downsample, img_lowres.shape[1]*self.downsample, img_lowres.shape[2]]
-                else:
-                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
-                newShape = np.array(np.round(newShape), dtype=int)
-
-                matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
-                matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
-
-                if self.orientation == 'sagittal':
-                    img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=img_lowres.header)
-                elif self.orientation == 'coronal':
-                    img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
-                elif self.orientation == 'axial':
-                    img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=img_lowres.header)
-                else:
-                    raise ValueError(f"Unexpected orientation value: {self.orientation}")
-                os.makedirs(filename.parent, exist_ok=True)
-                img_highres.save(filename)
+                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl],
+                                                     self.downsample, indiv_slides[idx], self.align_method, self.orientation))
+            dask.compute(jobs)
             if self.verbose:
                 print(f"\tRegistration of '{mod}' slides completed.")
     
@@ -718,7 +744,7 @@ class psoct:
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref, fnirt)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
         self.apply_to_lowres_images(indiv_slides, other_images)
-        # self.apply_to_highres_images(indiv_slides, other_images)
+        self.apply_to_highres_images(indiv_slides, other_images)
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
         return indiv_slides

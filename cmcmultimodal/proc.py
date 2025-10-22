@@ -12,18 +12,24 @@ import os
 import json
 import numpy as np
 from pathlib import Path
+import json
 import nibabel as nib
-import dask.multiprocessing
+import tempfile
 
 from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
-                                   plot_shifts, pad_image
+                                   plot_shifts, pad_image, calc_flirt
 from scipy.ndimage          import shift
 from fsl.data.image         import Image
-from fsl.wrappers           import flirt
+from fsl.wrappers           import flirt, fnirt, LOAD, applyxfm
 from fsl.transform.flirt    import flirtMatrixToSform
 from fsl.wrappers.avwutils  import fslsplit
-from fsl.wrappers           import LOAD
 import fsl.transform.affine as affine
+from cmcmultimodal.io import save_nifti
+import dask.multiprocessing
+import multiprocessing
+
+# set cores for dask parallel processing
+NUM_CORES = min(8, multiprocessing.cpu_count() - 1)
 
 # create sentinel object for slide_range
 _UNSET = object()
@@ -260,6 +266,8 @@ class psoct:
             raise ValueError("All input images have zero size!")
         else:
             max_slide_shape = get_image(self.slides_dict, all_slides[idx]).shape
+            # # increase max slide shape by 10% each side
+            # max_slide_shape = [i+min(max_slide_shape)//5 for i in max_slide_shape]
         return max_slide_shape
     
     def _get_ref_slide(self, ref):
@@ -274,7 +282,7 @@ class psoct:
         ref_shape = self._find_max_shape()
         return ref_slide, ref_shape
 
-    def align(self, ref='centre', thr=0):
+    def align(self, method='flirt', ref='centre', thr=0):
         ''' This method calculates the shifts between each slide and its neighbour.
         If the slide is before the central slide, it looks at the neighbour in front,
         otherwise look at the neighbour behind
@@ -283,62 +291,81 @@ class psoct:
         - ref: reference mode for alignment ('centre' for using the central slide)
         - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
         '''
-
+        self.align_method = method
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
         if self.verbose:
-            print(f"\tReference slide for alignment: {self.ref_slide}")
+            print(f"\tReference slide for alignment: {self.ref_slide}, size={self.ref_shape}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
         # TODO for interpolated_slides the alignment could be skipped?
-        if self.verbose:
-            print('\tRelative alignment values:')
+        dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+        jobs = []
         for sl in slides:
-        # Get image from dataframe
-            img = get_image(self.slides_dict, sl) 
+            # Get image from dataframe
             if sl == self.ref_slide:
-                t = np.array([0, 0]) # no shift if it is central slide
+                if self.align_method == 'cc':
+                    jobs.append(np.array([0, 0]))  # no shift if it is central slide
+                elif self.align_method == 'flirt':
+                    jobs.append(np.eye(4))
             else:
+                img = get_image(self.slides_dict, sl) 
                 if sl < self.ref_slide:
                     tgt = get_image(self.slides_dict, sl+1)
                 else:
                     tgt = get_image(self.slides_dict, sl-1)
-                t  = calc_shift(img, tgt, self.ref_shape)
-                # don't worry about small shifts
-                t[0] = t[0] if np.abs(t[0])>thr else 0.
-                t[1] = t[1] if np.abs(t[1])>thr else 0.
-            # Store shifts
-            self.rel_shifts[sl] = t
-            if self.verbose:
-                print('\t\t', sl, self.rel_shifts[sl])
-
+                if self.align_method == 'cc':
+                    jobs.append(dask.delayed(calc_shift)(img, tgt, self.ref_shape, thr))
+                elif self.align_method == 'flirt':
+                    jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape))
+        tmp_results = dask.compute(jobs)[0]
+        self.rel_shifts = dict(zip(slides, tmp_results))
         # Calculate absolute shifts
         self._calc_total_shift(self.rel_shifts)
 
     def _calc_total_shift(self, rel_shifts_dict):
-        for sl in rel_shifts_dict.keys():
-            self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
-                                                  self.ref_slide, first_slide=self.slide_range[0])
+        if self.align_method == 'cc':
+            for sl in rel_shifts_dict.keys():
+                self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
+                                                    self.ref_slide, first_slide=self.slide_range[0])
+        elif self.align_method == 'flirt':
+            slides = sorted(list(self.slides_dict.keys()))
+            self.abs_shifts = {self.ref_slide: np.eye(4)}
+            # left side: propagate forward
+            for sl in range(self.ref_slide-1, slides[0]-1, -1):
+                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl+1]
 
-    # Function to be called and "automate" the registration steps
-    def run_registration(self, bad_slides=None, align_ref='centre', align_thr=0, plot_alignment=False):
-        if self.verbose:
-            print('\nStarting slide registration process ...')
-        self.label_bad_slides(indices=bad_slides)
-        self.interpolate_missing_slides()
-        self.align(ref=align_ref, thr=align_thr)
-        if plot_alignment:
-            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
-            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
-        if self.verbose:
-            print('Slide registration completed.')
-    
+            # right side: propagate backward
+            for sl in range(self.ref_slide+1, slides[-1]+1):
+                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl-1]
+            
+            # sort the shifts by slide number
+            self.abs_shifts = dict(sorted(self.abs_shifts.items()))
+
+        else:
+            raise ValueError(f"Alignment method '${self.align_method}' is not recognised.")
 
     def _create_slide_deck(self, downsample=1, applyshift=True):
         slide_deck = []
+        # we assume that abs_shifts are sorted by slide number
         for sl in self.abs_shifts.keys():
             img_padded = pad_image(get_image(self.slides_dict, sl), self.ref_shape)
             if applyshift:
-                img_padded = shift(img_padded, self.abs_shifts[sl])
+                if self.align_method == 'cc':
+                    img_padded = shift(img_padded, self.abs_shifts[sl])
+                elif self.align_method == 'flirt':
+                    _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+                    save_nifti(img_padded, src_filename)
+                    _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                    img_padded = pad_image(get_image(self.slides_dict, self.ref_slide), self.ref_shape)
+                    save_nifti(img_padded, tgt_filename)
+                    img_padded = applyxfm(src_filename,
+                                          tgt_filename,
+                                          self.abs_shifts[sl],
+                                          LOAD,
+                                          twod=True)
+                    img_padded = img_padded['out'].get_fdata()
+                    Path.unlink(src_filename)
+                    Path.unlink(tgt_filename)
             slide_deck.append(img_padded[::downsample,::downsample])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
@@ -359,7 +386,7 @@ class psoct:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
         return slide_deck
     
-    def apply_registration(self, output_name=None, downsample=1):
+    def apply_registration(self, downsample=1):
         # TODO add this in a separate function?
         # Include pixel dimension in the header
         orig_pixel      = self.seq_params['in-plane resolution']
@@ -386,12 +413,11 @@ class psoct:
         slide_deck = self._create_slide_deck(downsample, applyshift=True)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
-        if output_name is not None:
-            self.slide_deck_img.save(self.output_path / output_name)
+        output_name = self.reg_modality[:3] + '_slide_deck'
+        self.slide_deck_img.save(self.output_path / output_name)
         if self.verbose:
             print('Done.')
 
-    # TODO add fnirt option
     def align_mri_to_psoct(self, mri_ref):
         # Register MRI to slide_deck
         # TODO does this need to be an image or could it be a filename?
@@ -400,8 +426,9 @@ class psoct:
         else:
             mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
         mri_img = Image(mri_ref_fullpath)
-        matfile = self.output_path / 'mri_to_slides.mat'
-        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_to_slides')
+        matfile = self.output_path / 'MRI_to_PSOCT.mat'
+        # TODO this assumes the input has the .nii.gz suffix
+        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_in_PSOCT')
         if self.verbose:
             print('\tRunning MRI-to-PSOCT registration ...', end=' ')
         flirt(src=mri_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
@@ -409,19 +436,32 @@ class psoct:
             print('Done.')
         return matfile, outfile
     
-    def align_psoct_to_mri(self, matfile, mri_ref):
-        mat     = np.loadtxt(matfile)
-        mat_inv = np.linalg.inv(mat)
-        outfile = self.output_path / 'slide_deck_to_mri'
+    def align_psoct_to_mri(self, matfile, mri_ref, nonlinear=False):
+        # invert and save tranformation matrix
+        mat      = np.loadtxt(matfile)
+        mat_inv  = np.linalg.inv(mat)
+        mat_file = self.output_path / 'PSOCT_to_MRI.mat'
+        np.savetxt(mat_file, mat_inv, fmt='%.10f', delimiter=' ')
+
         if mri_ref.is_absolute():
             mri_ref_fullpath = mri_ref
         else:
             mri_ref_fullpath = self.inp_path.parent.parent / mri_ref
 
-        xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
-        slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
-        slide_img_hdr.save(outfile)
-        np.savetxt(self.output_path / 'slides_to_mri.mat', mat_inv, fmt='%.10f', delimiter=' ')
+        if self.verbose:
+            print('\tRunning PSOCT-to-MRI registration ...', end=' ')
+        
+        # perform alignment
+        outfile = self.output_path / (self.reg_modality[:3] + '_slide_deck_in_MRI')
+        if nonlinear:
+            fnirt(src=self.slide_deck_img, ref=mri_ref, iout=outfile, aff=mat_file, config='data/fnirt_config', verbose=self.verbose)
+        else:
+            xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
+            slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
+            slide_img_hdr.save(outfile)
+
+        if self.verbose:
+            print('Done.')
         
         return outfile
 
@@ -438,8 +478,11 @@ class psoct:
         slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
         split_numbers = sorted(list(indiv_slides.keys()))
 
-        if self.verbose:
-            print('\tUpdating headers for slides:', end=' ')
+        def save_image(data, header, filename):
+            Image(data, header=header).save(filename)
+
+        dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+        jobs = []
         for sl, idx in zip(slide_numbers, split_numbers):
             img = indiv_slides[idx]
             # Get the relative path and update the slide number for the interpolated slides
@@ -449,13 +492,101 @@ class psoct:
             rel_path = rel_path.parent / '_'.join(fileparts)
             filename = self.output_path / self.reg_modality / str(rel_path).replace('.nii.gz', '_hdr.nii.gz')
             os.makedirs(filename.parent, exist_ok=True)
-            Image(img.get_fdata(), header=img.header).save(filename)
+            jobs.append(dask.delayed(save_image)(img.get_fdata(), img.header, filename))
             indiv_slides[idx] = filename
-            if self.verbose:
-                print(sl, end=',')
+        if self.verbose:
+            print('\tUpdating headers for registration slides ...', end=' ')
+        dask.compute(jobs)
         if self.verbose:
             print(' Done.')
         return indiv_slides
+    
+    def apply_to_lowres_images(self, indiv_slides, other_images=['Retardance']):
+        # Now apply this header to the low res images
+        # Note: they need to be zero-padded first and shifted!!
+
+        # convert other_images to a list if not already
+        if not isinstance(other_images, list):
+            other_images = [other_images]
+        
+        if self.slide_res == 'highres':
+            if self.verbose:
+                print(f"\tRegistration image is highres. Cannot apply to lowres images. Exiting...")
+            return
+        
+        # run alignment across all modalities
+        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, header, align_method, orientation):
+            img = Image(file).data[:,:,0]
+            # Zero-pad and shift
+            img_padded = pad_image(img, ref_shape)
+            if align_method == 'cc':
+                img_zp_shift  = shift(img_padded, abs_shift)
+            elif align_method == 'flirt':
+                _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+                save_nifti(img_padded, src_filename)
+                _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                save_nifti(img_padded, tgt_filename)
+                _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
+                img_zp_shift = applyxfm(src_filename,
+                                        tgt_filename,
+                                        abs_shift,
+                                        out_filename,
+                                        twod=True)
+                img_zp_shift = np.squeeze(Image(out_filename).data)
+                Path.unlink(src_filename)
+                Path.unlink(tgt_filename)
+                Path.unlink(out_filename)
+
+            if orientation == 'sagittal':
+                tgt_img = Image(img_zp_shift[None,:,:], header=header)
+            elif orientation == 'coronal':
+                tgt_img = Image(img_zp_shift[:,None,:], header=header)
+            elif orientation == 'axial':
+                tgt_img = Image(img_zp_shift[:,:,None], header=header)
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            os.makedirs(filename.parent, exist_ok=True)
+            tgt_img.save(filename)
+        
+        for mod in other_images:
+            # Skip registration modality
+            if mod == self.reg_modality:
+                continue
+
+            data_path = self.inp_path.parent / mod / 'lowres'
+            data_files = sorted(data_path.glob('Slice_*_En*.nii.gz'))
+            # TODO make this more versatile
+            mod_slide_numbers = np.array([int(Path(f).name.split('_')[1]) for f in data_files])
+
+            slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
+            split_numbers = sorted(list(indiv_slides.keys()))
+            
+            dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+            jobs = []
+            if self.verbose:
+                print(f"\tApplying registration matrix to lowres '{mod}' slides ...")
+            for sl, idx in zip(slide_numbers, split_numbers):
+                # skip bad_slides
+                if sl in self.bad_slides:
+                    continue
+                            
+                # Load Image
+                mod_idx = np.where(mod_slide_numbers == sl)[0]
+                if len(mod_idx) != 1:
+                    if self.verbose:
+                        print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
+                    continue
+                
+                ref_img = Image(indiv_slides[idx])
+                file = data_files[mod_idx[0]]
+                filename = self.output_path / mod / 'lowres' / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
+
+                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl], 
+                                                     ref_img.header, self.align_method, self.orientation))
+            dask.compute(jobs)
+            if self.verbose:
+                print(f"\tRegistration of '{mod}' slides completed.")
 
     def apply_to_highres_images(self, indiv_slides, other_images=['Retardance']):
         # Now apply this header to the high res images
@@ -464,48 +595,66 @@ class psoct:
         # convert other_images to a list if not already
         if not isinstance(other_images, list):
             other_images = [other_images]
-        
-        def proc_func(img, highres_file, filename, orientation, downsample, ref_shape, abs_shift):
-            img_lowres  = Image(img)
-            img_highres = Image(highres_file).data[:,:,0]
 
+        # run alignment across all modalities
+        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, downsample, ref_img, align_method, orientation):
+            ref_img = Image(ref_img)
+            tgt_img = Image(file).data[:,:,0]
             # Zero-pad and shift
-            highres_shape = [x * downsample for x in ref_shape]
-            img_padded    = pad_image(img_highres, highres_shape)
-            img_zp_shift  = shift(img_padded, abs_shift * downsample)
-            
+            ref_shape = [x * downsample for x in ref_shape]
+            img_padded = pad_image(tgt_img, ref_shape)
+            if align_method == 'cc':
+                img_zp_shift  = shift(img_padded, abs_shift * downsample)
+            elif align_method == 'flirt':
+                _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+                save_nifti(img_padded, src_filename)
+                _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                save_nifti(img_padded, tgt_filename)
+                _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
+                # TODO review if all three axes is correct here or needs just two
+                abs_shift[0:3,-1] = abs_shift[0:3,-1] * downsample
+                img_zp_shift = applyxfm(src_filename,
+                                        tgt_filename,
+                                        abs_shift,
+                                        out_filename,
+                                        twod=True)
+                img_zp_shift = np.squeeze(Image(out_filename).data)
+                Path.unlink(src_filename)
+                Path.unlink(tgt_filename)
+                Path.unlink(out_filename)
+
             if orientation == 'sagittal':
-                newShape = [img_lowres.shape[0], img_lowres.shape[1]*downsample, img_lowres.shape[2]*downsample]
+                newShape = [ref_img.shape[0], ref_img.shape[1]*downsample, ref_img.shape[2]*downsample]
             elif orientation == 'coronal':
-                newShape = [img_lowres.shape[0]*downsample, img_lowres.shape[1], img_lowres.shape[2]*downsample]
+                newShape = [ref_img.shape[0]*downsample, ref_img.shape[1], ref_img.shape[2]*downsample]
             elif orientation == 'axial':
-                newShape = [img_lowres.shape[0]*downsample, img_lowres.shape[1]*downsample, img_lowres.shape[2]]
+                newShape = [ref_img.shape[0]*downsample, ref_img.shape[1]*downsample, ref_img.shape[2]]
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
+            
             newShape = np.array(np.round(newShape), dtype=int)
-
-            matrix = affine.rescale(img_lowres.shape, newShape, 'centre')
-            matrix = affine.concat(img_lowres.voxToWorldMat, matrix)
+            matrix = affine.rescale(ref_img.shape, newShape, 'centre')
+            matrix = affine.concat(ref_img.voxToWorldMat, matrix)
 
             if orientation == 'sagittal':
-                img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=img_lowres.header)
+                img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=ref_img.header)
             elif orientation == 'coronal':
-                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=img_lowres.header)
+                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=ref_img.header)
             elif orientation == 'axial':
-                img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=img_lowres.header)
+                img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=ref_img.header)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
             os.makedirs(filename.parent, exist_ok=True)
             img_highres.save(filename)
-
+        
         # run alignment across all modalities
         dask.config.set(scheduler='processes', num_workers = 8)
         jobs = []
         for mod in other_images:
-            if self.verbose:
-                print(f"\tApplying registration matrix to '{mod}' slides ...")
+            # Skip registration modality
             if self.slide_res == 'highres' and mod == self.reg_modality:
-                return
+                continue
 
             data_path = self.inp_path.parent / mod
             data_files = sorted(data_path.glob('Slice_*_En*.nii.gz'))
@@ -515,6 +664,10 @@ class psoct:
             slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
             split_numbers = sorted(list(indiv_slides.keys()))
             
+            dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+            jobs = []
+            if self.verbose:
+                print(f"\tApplying registration matrix to highres '{mod}' slides ...")
             for sl, idx in zip(slide_numbers, split_numbers):
                 # skip bad_slides
                 if sl in self.bad_slides:
@@ -527,13 +680,15 @@ class psoct:
                         print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
                 
-                highres_file = data_files[mod_idx[0]]
-                filename = self.output_path / mod / str(highres_file.name).replace('.nii.gz', '_hdr.nii.gz')
-                jobs.append(dask.delayed(proc_func)(indiv_slides[idx], highres_file, filename, self.orientation,
-                                                self.downsample, self.ref_shape, self.abs_shifts[sl]))
-        dask.compute(jobs)
-        if self.verbose:
-            print(f"\tRegistration of '{other_images}' slides completed.")
+                # ref_img = Image(indiv_slides[idx])
+                file = data_files[mod_idx[0]]
+                filename = self.output_path / mod / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
+
+                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl],
+                                                     self.downsample, indiv_slides[idx], self.align_method, self.orientation))
+            dask.compute(jobs)
+            if self.verbose:
+                print(f"\tRegistration of '{mod}' slides completed.")
     
     def _save_shifts(self):
         with open(self.output_path / "abs_shifts.json", "w") as f:
@@ -543,7 +698,30 @@ class psoct:
         if self.verbose:
             print('\tRelative and absolute shifts saved.')
 
-    def run_slide_deck_creation(self, other_images, output_path, mri_ref, downsample=1):
+    
+    # Function to be called for flirt version of the pipeline
+    def run_pipeline(self,
+                     other_images,
+                     output_path,
+                     mri_ref,
+                     downsample=1,
+                     bad_slides=None,
+                     reg_method='flirt',
+                     fnirt=False,
+                     align_ref='centre',
+                     align_thr=0,
+                     plot_alignment=False
+        ):
+        if self.verbose:
+            print('\nStarting slide registration process ...')
+        self.label_bad_slides(indices=bad_slides)
+        self.interpolate_missing_slides()
+        self.align(method=reg_method, ref=align_ref, thr=align_thr)
+        if plot_alignment and reg_method == 'cc':
+            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
+            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
+        if self.verbose:
+            print('Slide registration completed.')
         if self.verbose:
             print('\nStarting slide deck creation ...')
         mri_ref = Path(mri_ref)
@@ -553,10 +731,11 @@ class psoct:
         # save shifts to a text file
         self._save_shifts()
         # save slide decks and header information
-        self.apply_registration(output_name='slide_deck', downsample=downsample)
+        self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
-        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref)
+        psoct_to_mri_file = self.align_psoct_to_mri(matfile, mri_ref, fnirt)
         indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
+        self.apply_to_lowres_images(indiv_slides, other_images)
         self.apply_to_highres_images(indiv_slides, other_images)
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")

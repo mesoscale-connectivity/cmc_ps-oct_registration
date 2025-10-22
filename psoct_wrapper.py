@@ -93,7 +93,6 @@ if __name__ == '__main__':
     start_dt = datetime.now()
     # read argument and execute code
     args = parse_cli_args()
-    # TODO propagate the non-linear flag when implemented
     run_psoct_pipeline(
         inp_path=args.inp_path,
         out_path=args.out_path,

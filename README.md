@@ -17,6 +17,7 @@ python psoct_wrapper.py --inp_path <your_subject_folder>
                         --seq_params <psoct_seq_params_json>
                         --mri_ref <mri_image_for_registration>
                         --reg_modality Retardance
+                        --reg_method 'flirt'
                         --other_images Retardance Orientation
                         --slide_range 98 200
                         --bad_slides 140

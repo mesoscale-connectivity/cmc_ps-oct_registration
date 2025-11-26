@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 import textwrap
 from pathlib import Path
-from cmcmultimodal.proc import psoct
+from cmcmultimodal.core.proc import psoct
 
 def run_psoct_pipeline(
     inp_path,
@@ -51,15 +51,8 @@ def run_psoct_pipeline(
     )
 
 def parse_cli_args():
-    parser = argparse.ArgumentParser(description=textwrap.dedent("""
-                                                                 PSOCT registration and slide deck creation pipeline
-
-                                                                 Usage:
-                                                                 python psoct_wrapper.py --inp_path <your_subject_folder> --out_path <your_results_folder> --seq_params <psoct_seq_params_json> --mri_ref <mri_image_for_registration> --reg_modality Retardance --other_images Retardance Orientation
-                                                                 python psoct_wrapper.py --inp_path <your_subject_folder> --out_path <your_results_folder> --seq_params <psoct_seq_params_json> --mri_ref <mri_image_for_registration> --reg_modality Retardance --other_images Retardance Orientation --slide_range 98 200 --bad_slides 140 --verbose
-                                                                 """),
-                                     formatter_class=argparse.RawTextHelpFormatter,
-                                     usage=argparse.SUPPRESS)
+    parser = argparse.ArgumentParser(description=textwrap.dedent("""PSOCT registration and slide deck creation pipeline"""),
+                                     formatter_class=argparse.RawTextHelpFormatter)
 
     # ---- Required arguments group ----
     required = parser.add_argument_group("Compulsory arguments")
@@ -75,8 +68,8 @@ def parse_cli_args():
     optional.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
     required.add_argument('--reg_method',  type=str, default='flirt', choices=['flirt', 'cc'], help="The registration method for within-slide alignment")
     optional.add_argument('--non_linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
-    optional.add_argument('--slide_range', type=int, nargs=2, default=None, help="Range of slides to process (start end)")
-    optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, help="List of bad slide numbers to skip")
+    optional.add_argument('--slide_range', type=int, nargs=2, default=None, metavar=('START', 'END'), help="Range of slides to process (start end)")
+    optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, metavar='SLIDE_NO', help="List of bad slide numbers to skip")
 
     optional.add_argument('--align_ref', type=str, default='centre', choices=['centre', 'first', 'last'], help="Reference slide for alignment")
     optional.add_argument('--align_thr', type=float, default=0.0,  help="Ignore shifts smaller than this threshold")
@@ -88,7 +81,7 @@ def parse_cli_args():
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+def main():
     start_time = time.time()
     start_dt = datetime.now()
     # read argument and execute code
@@ -118,3 +111,7 @@ if __name__ == '__main__':
         f.write(f"[{start_dt.isoformat()}] {cmd}\n"
                 f"→ Duration: {(end_time-start_time):.2f}s\n"
         )
+
+
+if __name__ == "__main__":
+    main()

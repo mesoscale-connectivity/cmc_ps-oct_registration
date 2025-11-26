@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 '''
-PSOCT results validator (to be used to compare newer to older versions of the pipeline)
+PSOCT results validator
+to be used to compare newer to older versions of the pipeline
 
 Authors: Vasilis Karlaftis      <vasilis.karlaftis@ndcn.ox.ac.uk>
 
@@ -23,12 +24,14 @@ def _compare_images(ref, est):
     elif ref_img.header != est_img.header:
         print('-', ref.name, ': Headers are NOT equal!')
 
+
 def _compare_matrices(ref, est):
     ref_mat = np.loadtxt(ref)
     est_mat = np.loadtxt(est)
 
     if not np.allclose(ref_mat, est_mat, atol=0.001):
         print('-', ref.name, ': Matrices are NOT equal!')
+
 
 def _compare_json(ref, est):
     with open(ref) as f:
@@ -47,8 +50,9 @@ def _compare_json(ref, est):
     if not is_equal:
         print('-', ref.name, ': JSON files are NOT equal!')
 
+
 def __run_subfile_code(subfile, corresponding_est_file):
-    if corresponding_est_file.exists() == False:
+    if corresponding_est_file.exists() is False:
         print('-', subfile.name, ': File does not exist in estimated path!')
         return
     if subfile.suffix in ['.nii', '.gz']:
@@ -70,7 +74,7 @@ def compare_results_folder(ref_path, est_path, subdir=False):
                     __run_subfile_code(subfile, corresponding_est_file)
         else:
             corresponding_est_file = est_path / file.name
-            if corresponding_est_file.exists() == False:
+            if corresponding_est_file.exists() is False:
                 print('-', file.name, ': File does not exist in estimated path!')
                 continue
             if file.suffix in ['.nii', '.gz']:

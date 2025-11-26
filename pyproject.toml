@@ -4,14 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmcmultimodal"
-version = "0.1.1"
+version = "0.1.2"
 description = "Tools for processing CMC multimodal data."
 authors = [
     {name="Saad Jbabdi", email="saad.jbabdi@ndcn.ox.ac.uk"},
     {name="Vasilis Karlaftis", email="vasilis.karlaftis@ndcn.ox.ac.uk"}
 ]
-readme = "README.md"
-requires-python = ">=3.10"
+readme = {file = "README.md", content-type="text/markdown"}
+requires-python = ">=3.10,<=3.14"
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
 
 dependencies = [
     "numpy",
@@ -20,9 +33,11 @@ dependencies = [
     "matplotlib"
 ]
 
+[project.scripts]
+psoct_wrapper = "cmcmultimodal.scripts.psoct_wrapper:main"
+
 [tool.setuptools]
 packages = ["cmcmultimodal"]
 
 [tool.pytest.ini_options]
-addopts = "-ra -q"
-testpaths = ["tests"]
+testpaths = ["cmcmultimodal.tests"]

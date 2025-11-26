@@ -11,12 +11,12 @@ Copyright (C) 2025 University of Oxford
 # Helper Functions
 import numpy as np
 from matplotlib import pyplot as plt
-from numpy.fft import fft, ifft, fft2, ifft2, ifftshift
-from scipy.ndimage import shift
+from numpy.fft import fft2, ifft2, ifftshift
 from fsl.data.image import Image
 from pathlib import Path
 from fsl.wrappers import flirt, LOAD
-from cmcmultimodal.io import save_nifti
+from cmcmultimodal.core.io import save_nifti
+
 
 def cross_correlate_2d(x, h):
     """Calculate cross-correlation between 2D images using Fourier
@@ -24,12 +24,14 @@ def cross_correlate_2d(x, h):
     h = ifftshift(ifftshift(h, axes=0), axes=1)
     return ifft2(fft2(x) * np.conj(fft2(h))).real
 
+
 def crop(x, s, axis):
     start = (x.shape[axis]-s)//2
-    if axis==0:
-        return x[start:start+s,:]
+    if axis == 0:
+        return x[start:start+s, :]
     else:
-        return x[:,start:start+s]
+        return x[:, start:start+s]
+
 
 # TODO investigate if this can be replaced by fslroi
 def pad_image(x_template, shape):
@@ -52,6 +54,7 @@ def pad_image(x_template, shape):
 
     return x_template_padded
 
+
 def calc_shift(src, tgt, shape, thr=0):
     """Calculate 2D translation that best aligns two images
     """
@@ -60,38 +63,35 @@ def calc_shift(src, tgt, shape, thr=0):
     CC = cross_correlate_2d(src_padded, tgt_padded)
     peak = np.unravel_index(np.argmax(CC, axis=None), CC.shape)
     t    = [-peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2]
-    t[0] = t[0] if np.abs(t[0])>thr else 0.
-    t[1] = t[1] if np.abs(t[1])>thr else 0.
+    t[0] = t[0] if np.abs(t[0]) > thr else 0.
+    t[1] = t[1] if np.abs(t[1]) > thr else 0.
     return np.array(t)
 
-def calc_flirt(src, tgt, shape):
+
+def calc_flirt(src, tgt, shape, cost='corratio'):
     """Calculate 2D registration that best aligns two images
     """
     import tempfile
-    # # find the max shape from the two input images
-    # shape = tuple(map(max, zip(tgt.shape, src.shape)))
-    # # increase max shape by 10% each side
-    # shape = tuple(i+min(shape)//5 for i in shape)
     # Pad input images to get them to the maximum size
     src_padded = pad_image(src, shape)
     tgt_padded = pad_image(tgt, shape)
     # Store the padded images for flirt usage
     _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
     _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-    # src_filename = 'tmp_padded_source.nii.gz'
-    # tgt_filename = 'tmp_padded_target.nii.gz'
     save_nifti(src_padded, src_filename)
     save_nifti(tgt_padded, tgt_filename)
     # Run flirt 2D registration
-    out = flirt(src_filename, tgt_filename,
+    out = flirt(src_filename,
+                tgt_filename,
                 omat=LOAD,
-                cost='leastsq',
+                cost=cost,
                 twod=True)
     # Delete temp files
     Path.unlink(src_filename)
     Path.unlink(tgt_filename)
 
     return out['omat']
+
 
 def plot_overlay(bckg, fore):
     """Overlay two images with foreground as contours
@@ -102,7 +102,8 @@ def plot_overlay(bckg, fore):
     plt.xticks([])
     plt.yticks([])
 
-def plot_shifts(slides, shifts, format = '-'):
+
+def plot_shifts(slides, shifts, format='-'):
     plt.figure()
     plt.plot(slides, shifts, format)
     plt.xlabel('Slide number (#)')
@@ -110,27 +111,30 @@ def plot_shifts(slides, shifts, format = '-'):
     plt.legend(['x-shift', 'y-shift'])
     plt.show()
 
+
 def get_image(D, sl):
     """Get image from slide dictionary
     If filename provided, load it, otherwise, return the array
     """
-    if type(D[sl]) == str or isinstance(D[sl], Path):
-        return Image(D[sl]).data[:,:,0]
+    if isinstance(D[sl], str) or isinstance(D[sl], Path):
+        return Image(D[sl]).data[:, :, 0]
     else:
         # TODO add if D[sl] in np.array, otherwise raise an error
         return D[sl]
 
+
 def crop_zeros(X):
-    ymin = np.min(np.where(X[X.shape[0]//2,:]>0)[0])
-    ymax = np.max(np.where(X[X.shape[0]//2,:]>0)[0])
-    xmin = np.min(np.where(X[:,X.shape[1]//2]>0)[0])
-    xmax = np.max(np.where(X[:,X.shape[1]//2]>0)[0])
-    return X[xmin:xmax+1,ymin:ymax+1]
+    ymin = np.min(np.where(X[X.shape[0]//2, :] > 0)[0])
+    ymax = np.max(np.where(X[X.shape[0]//2, :] > 0)[0])
+    xmin = np.min(np.where(X[:, X.shape[1]//2] > 0)[0])
+    xmax = np.max(np.where(X[:, X.shape[1]//2] > 0)[0])
+    return X[xmin:xmax+1, ymin:ymax+1]
+
 
 def get_total_shift(all_shifts, sl, central_slide, first_slide=1):
     """Add shifts all the way to central slide
     """
     if sl < central_slide:
-        return np.sum(all_shifts[sl-first_slide:central_slide-first_slide+1,:], axis=0)
+        return np.sum(all_shifts[sl-first_slide:central_slide-first_slide+1, :], axis=0)
     else:
-        return np.sum(all_shifts[central_slide-first_slide:sl-first_slide+1,:], axis=0)
+        return np.sum(all_shifts[central_slide-first_slide:sl-first_slide+1, :], axis=0)

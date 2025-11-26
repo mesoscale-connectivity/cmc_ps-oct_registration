@@ -12,16 +12,17 @@ Example usage of the CLI wrapper function.
 > Paths and filenames need to be updated to valid local paths.
 
 ```bash
-python psoct_wrapper.py --inp_path <your_subject_folder>
-                        --out_path <your_results_folder>
-                        --seq_params <psoct_seq_params_json>
-                        --mri_ref <mri_image_for_registration>
-                        --reg_modality Retardance
-                        --reg_method 'flirt'
-                        --other_images Retardance Orientation
-                        --slide_range 98 200
-                        --bad_slides 140
-                        --verbose
+psoct_wrapper --inp_path INP_PATH
+              --out_path OUT_PATH
+              --seq_params SEQ_PARAMS
+              --mri_ref MRI_REF
+              --reg_modality Retardance
+              --reg_method 'flirt'
+              --other_images Retardance Orientation
+              --slide_range 98 200
+              --bad_slides 140
+              --non-linear
+              --verbose
 ```
 
 ## Authors and acknowledgment

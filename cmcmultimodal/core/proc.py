@@ -12,19 +12,18 @@ import os
 import json
 import numpy as np
 from pathlib import Path
-import json
 import nibabel as nib
 import tempfile
 
-from cmcmultimodal.utils    import get_image, calc_shift, get_total_shift, \
-                                   plot_shifts, pad_image, calc_flirt
+from cmcmultimodal.core.utils    import get_image, calc_shift, get_total_shift, \
+                                        plot_shifts, pad_image, calc_flirt
 from scipy.ndimage          import shift
 from fsl.data.image         import Image
 from fsl.wrappers           import flirt, fnirt, LOAD, applyxfm
 from fsl.transform.flirt    import flirtMatrixToSform
 from fsl.wrappers.avwutils  import fslsplit
 import fsl.transform.affine as affine
-from cmcmultimodal.io import save_nifti
+from cmcmultimodal.core.io import save_nifti
 import dask.multiprocessing
 import multiprocessing
 
@@ -38,6 +37,7 @@ _UNSET = object()
 OrientationLookup = {'sagittal': ' x', 'coronal':  'y', 'axial':  'z'}
 # FSL convention for orientation
 FSLconvention     = {'sagittal': 'LR', 'coronal': 'PA', 'axial': 'IS'}
+
 
 class psoct:
 
@@ -76,7 +76,7 @@ class psoct:
         if value == self._slide_range:
             return
         if value is None:
-            self._slide_range = tuple([min(self.slide_numbers),max(self.slide_numbers)])
+            self._slide_range = tuple([min(self.slide_numbers), max(self.slide_numbers)])
         elif isinstance(value, (list, tuple)) and len(value) == 2:
             if all(isinstance(v, int) for v in value) and value[0] <= value[1]:
                 if value[0] < min(self.slide_numbers):
@@ -105,13 +105,13 @@ class psoct:
         self.interpolated_slides = []
         self.ref_slide = 0
         self.ref_shape = 0
-        self.rel_shifts = {}
-        self.abs_shifts = {}
+        self.rel_mat = {}
+        self.abs_mat = {}
         self.slide_deck_img = None
 
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
-        if self.slide_range is not None and self.slide_numbers is not None:
+        if (self.slide_range is not None) and (self.slide_numbers is not None):
             self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
             self.missing_slides = list(map(int, self.missing_slides))
             if self.verbose and len(self.missing_slides) > 0:
@@ -120,7 +120,7 @@ class psoct:
     def _load_slides(self):
         for sl, f in zip(self.slide_numbers, self.image_files):
             # slide_range is inclusive
-            if (sl>=self.slide_range[0])&(sl<=self.slide_range[1]):
+            if (sl >= self.slide_range[0]) and (sl <= self.slide_range[1]):
                 self.slides_dict[sl] = f  # slides_dict contains file names, not data
 
     def __check_input_folder(self):
@@ -151,7 +151,7 @@ class psoct:
         mandatory_keys = {'orientation', 'slice_order', 'in-plane resolution', 'out-of-plane resolution'}
         if not mandatory_keys.issubset(self.seq_params):
             raise ValueError(f"{seq_file} file does not contain all mandatory keys: {mandatory_keys}")
-    
+
     def _read_seq_params(self, seq_params):
         # check if JSON file is of a valid format
         self.__check_seq_params(seq_params)
@@ -196,7 +196,7 @@ class psoct:
     def label_bad_slides(self, indices=None):
         ''' List of bad slides as defined by visual assessment.'''
         if indices is not None and self.slide_range is not None:
-            self.bad_slides = [sl for sl in indices if sl>=self.slide_range[0] and sl<=self.slide_range[1]]
+            self.bad_slides = [sl for sl in indices if sl >= self.slide_range[0] and sl <= self.slide_range[1]]
 
     def _ignore_slides(self):
         # A list of bad and missing slides
@@ -207,13 +207,13 @@ class psoct:
         slide_arr = np.array(self.slide_numbers)
         for m in self._ignore_slides():
             # nearest slide before
-            before = slide_arr[(slide_arr - m)<0]
+            before = slide_arr[(slide_arr - m) < 0]
             if before.size == 0:
                 before = np.inf
             else:
                 before = before[np.argmin(np.abs(before-m))]
             # nearest slide after
-            after = slide_arr[(slide_arr - m)>0]
+            after = slide_arr[(slide_arr - m) > 0]
             if after.size == 0:
                 after = np.inf
             else:
@@ -221,11 +221,11 @@ class psoct:
             # If both are Inf (logically impossible but could happen if slide_numbers is empty), raise an error
             if np.isinf(before) and np.isinf(after):
                 raise ValueError(f"No available slide before or after missing slide {m}")
-            # weights for averaging - not in use
-            if not np.isinf(before) and not np.isinf(after) and before != after:
-                weights = np.array([m-before, after-m]) / (after-before)
-            else:
-                weights = np.array([1.0, 0.0]) if np.abs(m-before) < np.abs(after-m) else np.array([0.0, 1.0])
+            # # weights for averaging - not in use
+            # if not np.isinf(before) and not np.isinf(after) and before != after:
+            #     weights = np.array([m-before, after-m]) / (after-before)
+            # else:
+            #     weights = np.array([1.0, 0.0]) if np.abs(m-before) < np.abs(after-m) else np.array([0.0, 1.0])
             # change weights to getting closest
             # weights = np.round(weights)
             # create average image (assumes they are the same shape!)
@@ -250,7 +250,7 @@ class psoct:
         max_indices = np.where(all_sizes == np.max(all_sizes))[0]
         central_slide_num = all_slides[round(np.median(max_indices))]
         return central_slide_num
-    
+
     def _find_max_shape(self):
         # Independent function to find the max shape across slides, irrespective of zeroes
         # Find the size of each slide (excluding the interpolated ones)
@@ -266,10 +266,8 @@ class psoct:
             raise ValueError("All input images have zero size!")
         else:
             max_slide_shape = get_image(self.slides_dict, all_slides[idx]).shape
-            # # increase max slide shape by 10% each side
-            # max_slide_shape = [i+min(max_slide_shape)//5 for i in max_slide_shape]
         return max_slide_shape
-    
+
     def _get_ref_slide(self, ref):
         if ref == 'centre':
             ref_slide = self._find_central_slide()
@@ -283,13 +281,13 @@ class psoct:
         return ref_slide, ref_shape
 
     def align(self, method='flirt', ref='centre', thr=0):
-        ''' This method calculates the shifts between each slide and its neighbour.
+        ''' This method calculates the registration matrices between each slide and its neighbour.
         If the slide is before the central slide, it looks at the neighbour in front,
         otherwise look at the neighbour behind
 
         Parameters:
         - ref: reference mode for alignment ('centre' for using the central slide)
-        - thr: shift threshold. Any shifts lower than this are ignored (to minimize drifts)
+        - thr: shift threshold for 'cc' method. Any shifts lower than this are ignored (to minimize drifts)
         '''
         self.align_method = method
         self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
@@ -298,7 +296,7 @@ class psoct:
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
         # TODO for interpolated_slides the alignment could be skipped?
-        dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+        dask.config.set(scheduler='processes', num_workers=NUM_CORES)
         jobs = []
         for sl in slides:
             # Get image from dataframe
@@ -308,7 +306,7 @@ class psoct:
                 elif self.align_method == 'flirt':
                     jobs.append(np.eye(4))
             else:
-                img = get_image(self.slides_dict, sl) 
+                img = get_image(self.slides_dict, sl)
                 if sl < self.ref_slide:
                     tgt = get_image(self.slides_dict, sl+1)
                 else:
@@ -316,66 +314,63 @@ class psoct:
                 if self.align_method == 'cc':
                     jobs.append(dask.delayed(calc_shift)(img, tgt, self.ref_shape, thr))
                 elif self.align_method == 'flirt':
-                    jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape))
+                    # cost was 'leastsq' or 'normcorr' for Retardance reference
+                    jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape, cost='corratio'))
         tmp_results = dask.compute(jobs)[0]
-        self.rel_shifts = dict(zip(slides, tmp_results))
-        # Calculate absolute shifts
-        self._calc_total_shift(self.rel_shifts)
+        self.rel_mat = dict(zip(slides, tmp_results))
+        # Calculate absolute transformation matrices
+        self._calc_total_mat(self.rel_mat)
 
-    def _calc_total_shift(self, rel_shifts_dict):
+    def _calc_total_mat(self, rel_mat_dict):
         if self.align_method == 'cc':
-            for sl in rel_shifts_dict.keys():
-                self.abs_shifts[sl] = get_total_shift(np.array(list(rel_shifts_dict.values())), sl, 
-                                                    self.ref_slide, first_slide=self.slide_range[0])
+            for sl in rel_mat_dict.keys():
+                self.abs_mat[sl] = get_total_shift(np.array(list(rel_mat_dict.values())), sl,
+                                                   self.ref_slide, first_slide=self.slide_range[0])
         elif self.align_method == 'flirt':
             slides = sorted(list(self.slides_dict.keys()))
-            self.abs_shifts = {self.ref_slide: np.eye(4)}
+            self.abs_mat = {self.ref_slide: np.eye(4)}
             # left side: propagate forward
             for sl in range(self.ref_slide-1, slides[0]-1, -1):
-                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl+1]
-
+                self.abs_mat[sl] = self.abs_mat[sl+1] @ self.rel_mat[sl]
             # right side: propagate backward
             for sl in range(self.ref_slide+1, slides[-1]+1):
-                self.abs_shifts[sl] = self.rel_shifts[sl] @ self.abs_shifts[sl-1]
-            
-            # sort the shifts by slide number
-            self.abs_shifts = dict(sorted(self.abs_shifts.items()))
-
+                self.abs_mat[sl] = self.abs_mat[sl-1] @ self.rel_mat[sl]
+            # sort the matrices by slide number
+            self.abs_mat = dict(sorted(self.abs_mat.items()))
         else:
             raise ValueError(f"Alignment method '${self.align_method}' is not recognised.")
 
-    def _create_slide_deck(self, downsample=1, applyshift=True):
+    def _create_slide_deck(self, downsample=1):
         slide_deck = []
-        # we assume that abs_shifts are sorted by slide number
-        for sl in self.abs_shifts.keys():
+        # we assume that abs_mat are sorted by slide number
+        for sl in self.abs_mat.keys():
             img_padded = pad_image(get_image(self.slides_dict, sl), self.ref_shape)
-            if applyshift:
-                if self.align_method == 'cc':
-                    img_padded = shift(img_padded, self.abs_shifts[sl])
-                elif self.align_method == 'flirt':
-                    _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
-                    save_nifti(img_padded, src_filename)
-                    _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-                    img_padded = pad_image(get_image(self.slides_dict, self.ref_slide), self.ref_shape)
-                    save_nifti(img_padded, tgt_filename)
-                    img_padded = applyxfm(src_filename,
-                                          tgt_filename,
-                                          self.abs_shifts[sl],
-                                          LOAD,
-                                          twod=True)
-                    img_padded = img_padded['out'].get_fdata()
-                    Path.unlink(src_filename)
-                    Path.unlink(tgt_filename)
-            slide_deck.append(img_padded[::downsample,::downsample])
+            if self.align_method == 'cc':
+                img_padded = shift(img_padded, self.abs_mat[sl])
+            elif self.align_method == 'flirt':
+                _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
+                save_nifti(img_padded, src_filename)
+                _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
+                img_padded = pad_image(get_image(self.slides_dict, self.ref_slide), self.ref_shape)
+                save_nifti(img_padded, tgt_filename)
+                img_padded = applyxfm(src_filename,
+                                      tgt_filename,
+                                      self.abs_mat[sl],
+                                      LOAD,
+                                      twod=True)
+                img_padded = img_padded['out'].get_fdata()
+                Path.unlink(src_filename)
+                Path.unlink(tgt_filename)
+            slide_deck.append(img_padded[::downsample, ::downsample])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
         if self.orientation == 'sagittal':
-            slide_deck = np.transpose(slide_deck,(2,0,1)).copy()
+            slide_deck = np.transpose(slide_deck, (2, 0, 1)).copy()
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=0)
         elif self.orientation == 'coronal':
-            slide_deck = np.transpose(slide_deck,(0,2,1)).copy()
+            slide_deck = np.transpose(slide_deck, (0, 2, 1)).copy()
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=1)
         elif self.orientation == 'axial':
@@ -385,7 +380,7 @@ class psoct:
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
         return slide_deck
-    
+
     def apply_registration(self, downsample=1):
         # TODO add this in a separate function?
         # Include pixel dimension in the header
@@ -410,7 +405,7 @@ class psoct:
 
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
-        slide_deck = self._create_slide_deck(downsample, applyshift=True)
+        slide_deck = self._create_slide_deck(downsample)
         # TODO consider using io.save_nifti instead
         self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
         output_name = self.reg_modality[:3] + '_slide_deck'
@@ -428,14 +423,14 @@ class psoct:
         mri_img = Image(mri_ref_fullpath)
         matfile = self.output_path / 'MRI_to_PSOCT.mat'
         # TODO this assumes the input has the .nii.gz suffix
-        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz','_in_PSOCT')
+        outfile = self.output_path / Path(mri_ref).name.replace('.nii.gz', '_in_PSOCT')
         if self.verbose:
             print('\tRunning MRI-to-PSOCT registration ...', end=' ')
         flirt(src=mri_img, ref=self.slide_deck_img, out=outfile, omat=matfile, dof=12, interp='spline')
         if self.verbose:
             print('Done.')
         return matfile, outfile
-    
+
     def align_psoct_to_mri(self, matfile, mri_ref, nonlinear=False):
         # invert and save tranformation matrix
         mat      = np.loadtxt(matfile)
@@ -450,19 +445,19 @@ class psoct:
 
         if self.verbose:
             print('\tRunning PSOCT-to-MRI registration ...', end=' ')
-        
+
         # perform alignment
         outfile = self.output_path / (self.reg_modality[:3] + '_slide_deck_in_MRI')
         if nonlinear:
             fnirt(src=self.slide_deck_img, ref=mri_ref, iout=outfile, aff=mat_file, config='data/fnirt_config', verbose=self.verbose)
         else:
-            xform = flirtMatrixToSform(mat_inv,srcImage=self.slide_deck_img,refImage=Image(mri_ref_fullpath))
-            slide_img_hdr = Image(self.slide_deck_img.data, xform = xform)
+            xform = flirtMatrixToSform(mat_inv, srcImage=self.slide_deck_img, refImage=Image(mri_ref_fullpath))
+            slide_img_hdr = Image(self.slide_deck_img.data, xform=xform)
             slide_img_hdr.save(outfile)
 
         if self.verbose:
             print('Done.')
-        
+
         return outfile
 
     def update_nifti_headers(self, slide_deck):
@@ -474,14 +469,14 @@ class psoct:
             indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim=OrientationLookup[self.orientation])
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
-        
+
         slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
         split_numbers = sorted(list(indiv_slides.keys()))
 
         def save_image(data, header, filename):
             Image(data, header=header).save(filename)
 
-        dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+        dask.config.set(scheduler='processes', num_workers=NUM_CORES)
         jobs = []
         for sl, idx in zip(slide_numbers, split_numbers):
             img = indiv_slides[idx]
@@ -500,7 +495,7 @@ class psoct:
         if self.verbose:
             print(' Done.')
         return indiv_slides
-    
+
     def apply_to_lowres_images(self, indiv_slides, other_images=['Retardance']):
         # Now apply this header to the low res images
         # Note: they need to be zero-padded first and shifted!!
@@ -508,29 +503,29 @@ class psoct:
         # convert other_images to a list if not already
         if not isinstance(other_images, list):
             other_images = [other_images]
-        
+
         if self.slide_res == 'highres':
             if self.verbose:
-                print(f"\tRegistration image is highres. Cannot apply to lowres images. Exiting...")
+                print("\tRegistration image is highres. Cannot apply to lowres images. Exiting...")
             return
-        
+
         # run alignment across all modalities
-        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, header, align_method, orientation):
-            img = Image(file).data[:,:,0]
+        def image_proc(file, filename, ref_shape, ref_slide, abs_mat, header, align_method, orientation):
+            img = Image(file).data[:, :, 0]
             # Zero-pad and shift
             img_padded = pad_image(img, ref_shape)
             if align_method == 'cc':
-                img_zp_shift  = shift(img_padded, abs_shift)
+                img_zp_shift  = shift(img_padded, abs_mat)
             elif align_method == 'flirt':
                 _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
                 save_nifti(img_padded, src_filename)
                 _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                img_padded = pad_image(Image(ref_slide).data[:, :, 0], ref_shape)
                 save_nifti(img_padded, tgt_filename)
                 _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
                 img_zp_shift = applyxfm(src_filename,
                                         tgt_filename,
-                                        abs_shift,
+                                        abs_mat,
                                         out_filename,
                                         twod=True)
                 img_zp_shift = np.squeeze(Image(out_filename).data)
@@ -539,16 +534,16 @@ class psoct:
                 Path.unlink(out_filename)
 
             if orientation == 'sagittal':
-                tgt_img = Image(img_zp_shift[None,:,:], header=header)
+                tgt_img = Image(img_zp_shift[None, :, :], header=header)
             elif orientation == 'coronal':
-                tgt_img = Image(img_zp_shift[:,None,:], header=header)
+                tgt_img = Image(img_zp_shift[:, None, :], header=header)
             elif orientation == 'axial':
-                tgt_img = Image(img_zp_shift[:,:,None], header=header)
+                tgt_img = Image(img_zp_shift[:, :, None], header=header)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
             os.makedirs(filename.parent, exist_ok=True)
             tgt_img.save(filename)
-        
+
         for mod in other_images:
             # Skip registration modality
             if mod == self.reg_modality:
@@ -561,8 +556,8 @@ class psoct:
 
             slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
             split_numbers = sorted(list(indiv_slides.keys()))
-            
-            dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+
+            dask.config.set(scheduler='processes', num_workers=NUM_CORES)
             jobs = []
             if self.verbose:
                 print(f"\tApplying registration matrix to lowres '{mod}' slides ...")
@@ -570,19 +565,19 @@ class psoct:
                 # skip bad_slides
                 if sl in self.bad_slides:
                     continue
-                            
+
                 # Load Image
                 mod_idx = np.where(mod_slide_numbers == sl)[0]
                 if len(mod_idx) != 1:
                     if self.verbose:
                         print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
-                
+
                 ref_img = Image(indiv_slides[idx])
                 file = data_files[mod_idx[0]]
                 filename = self.output_path / mod / 'lowres' / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
 
-                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl], 
+                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_mat[sl],
                                                      ref_img.header, self.align_method, self.orientation))
             dask.compute(jobs)
             if self.verbose:
@@ -597,26 +592,26 @@ class psoct:
             other_images = [other_images]
 
         # run alignment across all modalities
-        def image_proc(file, filename, ref_shape, ref_slide, abs_shift, downsample, ref_img, align_method, orientation):
+        def image_proc(file, filename, ref_shape, ref_slide, abs_mat, downsample, ref_img, align_method, orientation):
             ref_img = Image(ref_img)
-            tgt_img = Image(file).data[:,:,0]
+            tgt_img = Image(file).data[:, :, 0]
             # Zero-pad and shift
             ref_shape = [x * downsample for x in ref_shape]
             img_padded = pad_image(tgt_img, ref_shape)
             if align_method == 'cc':
-                img_zp_shift  = shift(img_padded, abs_shift * downsample)
+                img_zp_shift  = shift(img_padded, abs_mat * downsample)
             elif align_method == 'flirt':
                 _, src_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
                 save_nifti(img_padded, src_filename)
                 _, tgt_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-                img_padded = pad_image(Image(ref_slide).data[:,:,0], ref_shape)
+                img_padded = pad_image(Image(ref_slide).data[:, :, 0], ref_shape)
                 save_nifti(img_padded, tgt_filename)
                 _, out_filename  = tempfile.mkstemp(suffix=".nii.gz", prefix="out_")
                 # TODO review if all three axes is correct here or needs just two
-                abs_shift[0:3,-1] = abs_shift[0:3,-1] * downsample
+                abs_mat[0:3, -1] = abs_mat[0:3, -1] * downsample
                 img_zp_shift = applyxfm(src_filename,
                                         tgt_filename,
-                                        abs_shift,
+                                        abs_mat,
                                         out_filename,
                                         twod=True)
                 img_zp_shift = np.squeeze(Image(out_filename).data)
@@ -632,25 +627,23 @@ class psoct:
                 newShape = [ref_img.shape[0]*downsample, ref_img.shape[1]*downsample, ref_img.shape[2]]
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
-            
+
             newShape = np.array(np.round(newShape), dtype=int)
             matrix = affine.rescale(ref_img.shape, newShape, 'centre')
             matrix = affine.concat(ref_img.voxToWorldMat, matrix)
 
             if orientation == 'sagittal':
-                img_highres = Image(img_zp_shift[None,:,:], xform=matrix, header=ref_img.header)
+                img_highres = Image(img_zp_shift[None, :, :], xform=matrix, header=ref_img.header)
             elif orientation == 'coronal':
-                img_highres = Image(img_zp_shift[:,None,:], xform=matrix, header=ref_img.header)
+                img_highres = Image(img_zp_shift[:, None, :], xform=matrix, header=ref_img.header)
             elif orientation == 'axial':
-                img_highres = Image(img_zp_shift[:,:,None], xform=matrix, header=ref_img.header)
+                img_highres = Image(img_zp_shift[:, :, None], xform=matrix, header=ref_img.header)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
             os.makedirs(filename.parent, exist_ok=True)
             img_highres.save(filename)
-        
+
         # run alignment across all modalities
-        dask.config.set(scheduler='processes', num_workers = 8)
-        jobs = []
         for mod in other_images:
             # Skip registration modality
             if self.slide_res == 'highres' and mod == self.reg_modality:
@@ -663,8 +656,8 @@ class psoct:
 
             slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
             split_numbers = sorted(list(indiv_slides.keys()))
-            
-            dask.config.set(scheduler='processes', num_workers = NUM_CORES)
+
+            dask.config.set(scheduler='processes', num_workers=NUM_CORES)
             jobs = []
             if self.verbose:
                 print(f"\tApplying registration matrix to highres '{mod}' slides ...")
@@ -672,33 +665,31 @@ class psoct:
                 # skip bad_slides
                 if sl in self.bad_slides:
                     continue
-                                
+
                 # Load Image
                 mod_idx = np.where(mod_slide_numbers == sl)[0]
                 if len(mod_idx) != 1:
                     if self.verbose:
                         print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
-                
-                # ref_img = Image(indiv_slides[idx])
+
                 file = data_files[mod_idx[0]]
                 filename = self.output_path / mod / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
 
-                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_shifts[sl],
+                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_mat[sl],
                                                      self.downsample, indiv_slides[idx], self.align_method, self.orientation))
             dask.compute(jobs)
             if self.verbose:
                 print(f"\tRegistration of '{mod}' slides completed.")
-    
-    def _save_shifts(self):
-        with open(self.output_path / "abs_shifts.json", "w") as f:
-            json.dump({int(k): v.tolist() for k, v in self.abs_shifts.items()}, f)
-        with open(self.output_path / "rel_shifts.json", "w") as f:
-            json.dump({int(k): v.tolist() for k, v in self.rel_shifts.items()}, f)
-        if self.verbose:
-            print('\tRelative and absolute shifts saved.')
 
-    
+    def _save_matrices(self):
+        with open(self.output_path / "abs_mat.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.abs_mat.items()}, f)
+        with open(self.output_path / "rel_mat.json", "w") as f:
+            json.dump({int(k): v.tolist() for k, v in self.rel_mat.items()}, f)
+        if self.verbose:
+            print('\tRelative and absolute transformation matrices saved.')
+
     # Function to be called for flirt version of the pipeline
     def run_pipeline(self,
                      other_images,
@@ -710,26 +701,30 @@ class psoct:
                      fnirt=False,
                      align_ref='centre',
                      align_thr=0,
-                     plot_alignment=False
-        ):
+                     plot_alignment=False,
+                     ref_copy=True):
         if self.verbose:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
         self.align(method=reg_method, ref=align_ref, thr=align_thr)
         if plot_alignment and reg_method == 'cc':
-            plot_shifts(self.rel_shifts.keys(), self.rel_shifts.values(), '-o')
-            plot_shifts(self.abs_shifts.keys(), self.abs_shifts.values(), '-')
+            plot_shifts(self.rel_mat.keys(), self.rel_mat.values(), '-o')
+            plot_shifts(self.abs_mat.keys(), self.abs_mat.values(), '-')
         if self.verbose:
             print('Slide registration completed.')
         if self.verbose:
             print('\nStarting slide deck creation ...')
-        mri_ref = Path(mri_ref)
         # TODO consider moving the next two lines into apply_registration
         self.output_path = Path(output_path)
         os.makedirs(self.output_path, exist_ok=True)
-        # save shifts to a text file
-        self._save_shifts()
+        # save matrices to a text file
+        self._save_matrices()
+        # save a copy of the mri_ref in the output folder
+        mri_ref = Path(mri_ref)
+        if ref_copy:
+            import shutil
+            shutil.copyfile(mri_ref, self.output_path / mri_ref.name)
         # save slide decks and header information
         self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct(mri_ref)
@@ -740,4 +735,3 @@ class psoct:
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")
         return indiv_slides
-    

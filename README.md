@@ -16,8 +16,8 @@ psoct_wrapper --inp_path INP_PATH
               --out_path OUT_PATH
               --seq_params SEQ_PARAMS
               --mri_ref MRI_REF
-              --reg_modality Retardance
-              --reg_method 'flirt'
+              --psoct_reg_modality Cross
+              --mri_reg_modality Retardance
               --other_images Retardance Orientation
               --slide_range 98 200
               --bad_slides 140

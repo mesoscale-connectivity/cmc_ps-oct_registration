@@ -11,6 +11,7 @@ Copyright (C) 2025 University of Oxford
 from fsl.data.image import Image
 import numpy as np
 import json
+from pathlib import Path
 
 
 def _compare_images(ref, est):
@@ -62,6 +63,8 @@ def __run_subfile_code(subfile, corresponding_est_file):
 
 
 def compare_results_folder(ref_path, est_path, subdir=False):
+    ref_path = Path(ref_path)
+    est_path = Path(est_path)
     for file in ref_path.glob('*'):
         if subdir and file.is_dir():
             for subfile in file.glob('*'):

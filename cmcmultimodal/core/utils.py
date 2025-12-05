@@ -15,7 +15,6 @@ from numpy.fft import fft2, ifft2, ifftshift
 from fsl.data.image import Image
 from pathlib import Path
 from fsl.wrappers import flirt, LOAD
-from cmcmultimodal.core.io import save_nifti
 
 
 def cross_correlate_2d(x, h):
@@ -68,7 +67,7 @@ def calc_shift(src, tgt, shape, thr=0):
     return np.array(t)
 
 
-def calc_flirt(src, tgt, shape, cost='corratio'):
+def calc_flirt(src, tgt, shape, header, cost='corratio'):
     """Calculate 2D registration that best aligns two images
     """
     import tempfile
@@ -78,8 +77,8 @@ def calc_flirt(src, tgt, shape, cost='corratio'):
     # Store the padded images for flirt usage
     _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
     _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-    save_nifti(src_padded, src_filename)
-    save_nifti(tgt_padded, tgt_filename)
+    Image(src_padded, xform=header.get_sform(), header=header).save(src_filename)
+    Image(tgt_padded, xform=header.get_sform(), header=header).save(tgt_filename)
     # Run flirt 2D registration
     out = flirt(src_filename,
                 tgt_filename,

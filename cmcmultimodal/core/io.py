@@ -28,7 +28,7 @@ def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     key          = np.array(list(mat_contents.keys()))[select][0]
     # Create array
     X = np.array(mat_contents[key])
-    X = np.fliplr(X).T
+    X = X.T
     # Deal with orientation
     if X.dtype == np.complex128:
         X = np.angle(X)

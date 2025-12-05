@@ -24,18 +24,22 @@ def run_psoct_pipeline(
     lowres=True,
     slide_range=None,
     bad_slides=None,
-    reg_method='flirt',
     fnirt=False,
     align_ref='centre',
-    align_thr=0,
-    plot_alignment=False,
-    reg_modality='Retardance',
+    psoct_reg_mod='Cross',
+    mri_reg_mod='Retardance',
     reg_downsample=1,
     other_images=['Retardance', 'Cross'],
     verbose=False):
 
     # Initialize the object
-    ps = psoct(inp_path=Path(inp_path), seq_params=seq_params, lowres=lowres, slide_range=slide_range, reg_modality=reg_modality, verbose=verbose)
+    ps = psoct(inp_path=Path(inp_path),
+               seq_params=seq_params,
+               lowres=lowres,
+               slide_range=slide_range,
+               psoct_reg_mod=psoct_reg_mod,
+               mri_reg_mod=mri_reg_mod,
+               verbose=verbose)
 
     # Run pipeline
     _ = ps.run_pipeline(other_images=other_images,
@@ -43,11 +47,8 @@ def run_psoct_pipeline(
                         mri_ref=mri_ref,
                         downsample=reg_downsample,
                         bad_slides=bad_slides,
-                        reg_method=reg_method,
                         fnirt=fnirt,
                         align_ref=align_ref,
-                        align_thr=align_thr,
-                        plot_alignment=plot_alignment
     )
 
 def parse_cli_args():
@@ -56,26 +57,23 @@ def parse_cli_args():
 
     # ---- Required arguments group ----
     required = parser.add_argument_group("Compulsory arguments")
-    required.add_argument('-in',  '--inp_path', type=str, required=True, help="Input path to PSOCT dataset")
-    required.add_argument('-out', '--out_path', type=str, required=True, help="Output directory for results")
-    required.add_argument('--seq_params',       type=str, required=True, help="Path to PSOCT sequence parameters' JSON file")
-    required.add_argument('--mri_ref',          type=str, required=True, help="Reference MRI NIfTI file for alignment")
-    required.add_argument('--reg_modality',     type=str, required=True, choices=['Retardance', 'Cross', 'Orientation'], help="The PSOCT modality to be used for alignment")
-    required.add_argument('--other_images',     type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation'], help="One or more PSOCT modalities to apply the registration to")
+    required.add_argument('-in',  '--inp_path',   type=str, required=True, help="Input path to PSOCT dataset")
+    required.add_argument('-out', '--out_path',   type=str, required=True, help="Output directory for results")
+    required.add_argument('--seq_params',         type=str, required=True, help="Path to PSOCT sequence parameters' JSON file")
+    required.add_argument('--mri_ref',            type=str, required=True, help="Reference MRI NIfTI file for alignment")
+    required.add_argument('--psoct_reg_modality', type=str, required=True, help="The PSOCT modality to be used for between-slide alignment")
+    required.add_argument('--mri_reg_modality',   type=str, required=True, help="The PSOCT modality to be used for alignment to MRI")
+    required.add_argument('--other_images',       type=str, required=True, nargs='*', choices=['Retardance', 'Cross', 'Orientation', 'Reflectivity'], help="One or more PSOCT modalities to apply the registration to")
 
     # ---- Optional arguments group ----
     optional = parser.add_argument_group("Optional arguments")
     optional.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
-    required.add_argument('--reg_method',  type=str, default='flirt', choices=['flirt', 'cc'], help="The registration method for within-slide alignment")
     optional.add_argument('--non_linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     optional.add_argument('--slide_range', type=int, nargs=2, default=None, metavar=('START', 'END'), help="Range of slides to process (start end)")
     optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, metavar='SLIDE_NO', help="List of bad slide numbers to skip")
 
     optional.add_argument('--align_ref', type=str, default='centre', choices=['centre', 'first', 'last'], help="Reference slide for alignment")
-    optional.add_argument('--align_thr', type=float, default=0.0,  help="Ignore shifts smaller than this threshold")
     optional.add_argument('--reg_downsample', type=int, default=1, help="Downsample factor for the slide deck")
-    # TODO add plot save function for this to be sensible option
-    # optional.add_argument('--plot_alignment', action='store_true', help="Plot relative and absolute shifts (default: False)")
     optional.add_argument('-v', '--verbose',  action='store_true', help="Print diagnostic information while running")
 
     return parser.parse_args()
@@ -87,22 +85,20 @@ def main():
     # read argument and execute code
     args = parse_cli_args()
     run_psoct_pipeline(
-        inp_path=args.inp_path,
-        out_path=args.out_path,
-        seq_params=args.seq_params,
-        mri_ref=args.mri_ref,
-        lowres=(not args.highres),
-        slide_range=tuple(args.slide_range) if args.slide_range else None,
-        bad_slides=args.bad_slides,
-        reg_method=args.reg_method,
-        fnirt=args.non_linear,
-        align_ref=args.align_ref,
-        align_thr=args.align_thr,
-        # plot_alignment=args.plot_alignment,
-        reg_modality=args.reg_modality,
-        reg_downsample=args.reg_downsample,
-        other_images = args.other_images,
-        verbose=args.verbose
+        inp_path        = args.inp_path,
+        out_path        = args.out_path,
+        seq_params      = args.seq_params,
+        mri_ref         = args.mri_ref,
+        lowres          = (not args.highres),
+        slide_range     = tuple(args.slide_range) if args.slide_range else None,
+        bad_slides      = args.bad_slides,
+        fnirt           = args.non_linear,
+        align_ref       = args.align_ref,
+        psoct_reg_mod   = args.psoct_reg_modality,
+        mri_reg_mod     = args.mri_reg_modality,
+        reg_downsample  = args.reg_downsample,
+        other_images    = args.other_images,
+        verbose         = args.verbose
     )
     # store command line in txt file
     end_time = time.time()

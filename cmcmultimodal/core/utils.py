@@ -53,6 +53,18 @@ def pad_image(x_template, shape):
 
     return x_template_padded
 
+def save_padded_slides(slides, shape, hdr, out_fd):
+    """Run and store zero-pad images for all slides
+    """
+    for sl in slides.keys():
+        img = get_image(slides, sl)
+        img_padded = pad_image(img, shape)
+        out_filename = Path(out_fd) / Path(slides[sl]).name
+        Image(img_padded, xform=hdr.get_sform(), header=hdr).save(out_filename)
+        slides[sl] = out_filename
+
+    return slides
+
 
 def calc_shift(src, tgt, shape, thr=0):
     """Calculate 2D translation that best aligns two images

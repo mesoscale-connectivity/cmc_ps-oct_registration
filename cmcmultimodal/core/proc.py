@@ -16,9 +16,9 @@ import nibabel as nib
 # import tempfile
 # import glob
 
-from cmcmultimodal.core.utils    import get_image, pad_image, calc_flirt
+from cmcmultimodal.core.utils    import get_image, pad_image, save_padded_slides, calc_flirt
 from fsl.data.image              import Image
-from fsl.wrappers                import flirt, fnirt, applyxfm#, LOAD
+from fsl.wrappers                import flirt, fnirt, applyxfm, LOAD
 from fsl.transform.flirt         import flirtMatrixToSform, readFlirt, fromFlirt
 # from fsl.wrappers.avwutils       import fslsplit
 import fsl.transform.affine as affine
@@ -38,7 +38,7 @@ OrientationLookup = {'sagittal': ' x', 'coronal':  'y', 'axial':  'z'}
 FSLconvention     = {'sagittal': 'LR', 'coronal': 'PA', 'axial': 'IS'}
 
 # set relative path to fnirt config file
-fnirt_config = '../config/fnirt_config'
+fnirt_config = Path(os.path.dirname(__file__)).parent / 'config/fnirt_config'
 
 
 class psoct:
@@ -118,7 +118,7 @@ class psoct:
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
         if (self.slide_range is not None) and (self.slide_numbers is not None):
-            self.missing_slides = list(set(np.arange(self.slide_range[0], self.slide_range[1]+1)) - set(self.slide_numbers))
+            self.missing_slides = list(set(np.arange(min(self.slide_range), max(self.slide_range)+1)) - set(self.slide_numbers))
             self.missing_slides = list(map(int, self.missing_slides))
             if self.verbose and len(self.missing_slides) > 0:
                 print(f"\tFound {len(self.missing_slides)} missing slides: {self.missing_slides}")
@@ -301,6 +301,7 @@ class psoct:
             print(f"\tReference slide for alignment: {self.ref_slide}, size={self.ref_shape}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
+
         # create image default header
         hdr = nib.Nifti1Header()
         hdr.set_xyzt_units(xyz='mm', t='sec')
@@ -311,6 +312,10 @@ class psoct:
         voxdim = [lr_pixel, lr_pixel, slice_thickness]
         matrix = np.diag([*voxdim, 1])
         hdr.set_sform(matrix, code=2)
+
+        # # Pad slides
+        # os.makedirs(self.output_path / 'padded_slices', exist_ok=True)
+        # self.slides_dict = save_padded_slides(self.slides_dict, self.ref_shape, hdr, self.output_path / 'padded_slices')
 
         # TODO for interpolated_slides the alignment could be skipped?
         dask.config.set(scheduler='processes', num_workers=NUM_CORES)
@@ -327,7 +332,9 @@ class psoct:
                     tgt = get_image(self.slides_dict, sl-1)
                 # cost was 'leastsq' or 'normcorr' for Retardance reference
                 jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape, hdr, cost='corratio'))
+                # jobs.append(dask.delayed(flirt)(img, tgt, omat=LOAD, cost='corratio', twod=True))
         tmp_results = dask.compute(jobs)[0]
+        # tmp_results = dask.compute(jobs)['omat'][0]
         self.rel_mat = dict(zip(slides, tmp_results))
         # Calculate absolute transformation matrices
         self._calc_total_mat(self.rel_mat)
@@ -426,6 +433,8 @@ class psoct:
         # re-read input data if mri_reg_mod != psoct_reg_mod
         if self.mri_reg_mod != self.psoct_reg_mod:
             self.inp_path = self.inp_path / '..' / self.mri_reg_mod
+            if self.verbose:
+                print("")
             self._find_all_slides(self.slide_res=='lowres')
             # self._find_missing_slides() # missing slides should be the same
             self._load_slides()
@@ -450,6 +459,7 @@ class psoct:
             # TODO add orientation check
             Image(img_padded[:,None,:], xform=xform, header=header).save(raw_filename)
             res_filename = output_path / 'resampled_slices' / f'slide_{str(sl).zfill(3)}'
+            # TODO change this to fsl.utils.image.resample.resampleToReference?
             applyxfm(src_filename,
                      tgt_filename,
                      abs_mat,
@@ -460,6 +470,7 @@ class psoct:
         for sl in self.abs_mat.keys():
             tmp_matrix = np.diag([*[lr_pixel, lr_pixel, slice_thickness], 1])
             temp_hdr = hdr.copy()
+            # TODO review hdr vs temp_hdr usage
             hdr.set_sform(tmp_matrix, code=2)
             jobs.append(dask.delayed(save_image)(self.slides_dict, sl, self.ref_shape, self.ref_slide,
                                                  tmp_matrix, temp_hdr, self.abs_mat[sl], slice_thickness,
@@ -531,7 +542,8 @@ class psoct:
         # perform alignment
         outfile = self.output_path / (self.mri_reg_mod[:3] + '_slide_deck_in_MRI')
         if nonlinear:
-            fnirt(src=self.slide_deck_img, ref=mri_ref_fullpath, iout=outfile, aff=mat_file, config=fnirt_config, verbose=self.verbose)
+            field_file = self.output_path / 'PSOCT_to_MRI_warpfield.nii.gz'
+            fnirt(src=self.slide_deck_img, ref=mri_ref_fullpath, iout=outfile, fout=field_file, aff=mat_file, config=fnirt_config, verbose=self.verbose)
         else:
             xform = flirtMatrixToSform(mat_inv, srcImage=self.slide_deck_img, refImage=Image(mri_ref_fullpath))
             Image(self.slide_deck_img.data, xform=xform).save(outfile)
@@ -619,16 +631,16 @@ class psoct:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
             
             # readFlirt is just np.loadtxt
-            mat = readFlirt(output_path / 'PSOCT_to_MRI.mat')
-            # convert flirt matrix into a world->world transformation
-            mat = fromFlirt(mat, Image(slide_deck), Image(mri_ref), from_='world', to='world')
-            # concat is just matmul, i.e. '@'
-            matrix = affine.concat(mat, tgt_img.getAffine('voxel', 'world'))
+            # mat = readFlirt(output_path / 'PSOCT_to_MRI.mat')
+            # # convert flirt matrix into a world->world transformation
+            # mat = fromFlirt(mat, Image(slide_deck), Image(mri_ref), from_='world', to='world')
+            # # concat is just matmul, i.e. '@'
+            # xform = affine.concat(mat, tgt_img.getAffine('voxel', 'world'))
 
-            tgt_img.header.set_sform(matrix, code=2)
+            # tgt_img.header.set_sform(matrix, code=2)
 
             os.makedirs(filename.parent, exist_ok=True)
-            Image(tgt_img).save(filename)
+            Image(tgt_img.data, xform=xform, header=header).save(filename)
 
         for mod in other_images:
 
@@ -673,6 +685,7 @@ class psoct:
                 print(f"\tRegistration of '{mod}' slides completed.")
 
     def apply_to_highres_images(self, other_images=['Retardance']):
+        # TODO make this work even if slide_res=='highres'
         # Now apply this header to the high res images
 
         # convert other_images to a list if not already

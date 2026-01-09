@@ -16,10 +16,10 @@ import nibabel as nib
 # import tempfile
 # import glob
 
-from cmcmultimodal.core.utils    import get_image, pad_image, save_padded_slides, calc_flirt
+from cmcmultimodal.core.utils    import get_image, pad_image, calc_flirt#, save_padded_slides
 from fsl.data.image              import Image
-from fsl.wrappers                import flirt, fnirt, applyxfm, LOAD
-from fsl.transform.flirt         import flirtMatrixToSform, readFlirt, fromFlirt
+from fsl.wrappers                import flirt, fnirt, applyxfm, invwarp#, LOAD
+from fsl.transform.flirt         import flirtMatrixToSform#, readFlirt, fromFlirt
 # from fsl.wrappers.avwutils       import fslsplit
 import fsl.transform.affine as affine
 # from cmcmultimodal.core.io       import save_nifti
@@ -552,6 +552,17 @@ class psoct:
             print('Done.')
 
         return outfile
+    
+    def invert_warpfield(self):
+        if self.verbose:
+            print('\tInverting warpfield ...', end=' ')
+        invwarp(self.output_path / 'PSOCT_to_MRI_warpfield.nii.gz',
+                self.slide_deck,
+                self.output_path / 'MRI_to_PSOCT_warpfield.nii.gz',
+                verbose=self.verbose,
+                noconstraint=True)
+        if self.verbose:
+            print('Done.')
 
     # def update_nifti_headers(self, slide_deck):
     #     # Add header information to single slides
@@ -782,7 +793,8 @@ class psoct:
                      bad_slides=None,
                      fnirt=False,
                      align_ref='centre',
-                     ref_copy=True):
+                     ref_copy=True,
+                     inv_warp=False):
         if self.verbose:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
@@ -807,6 +819,8 @@ class psoct:
         self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct()
         psoct_to_mri_file = self.align_psoct_to_mri(matfile, fnirt)
+        if inv_warp and fnirt:
+            self.invert_warpfield()
         # indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
         # TODO make sure these work for highres reference too!
         self.apply_to_lowres_images(other_images)

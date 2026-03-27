@@ -14,7 +14,7 @@ from pathlib import Path
 from fsl.data.image import Image
 
 
-def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
+def mat2nii(mat_file, seq_params, nii_file=None, nii_lowres_file=None, downsample=0):
     '''Convert and store a PSOCT .mat file to a NIFTI image.
     Optionally also create a low-resolution version.
     '''
@@ -28,7 +28,13 @@ def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     key          = np.array(list(mat_contents.keys()))[select][0]
     # Create array
     X = np.array(mat_contents[key])
-    X = X.T
+    # TODO add 'orientation' if statements
+    # # Rotate image by 90 degrees counterclockwise and the LR flop - ONLY FOR MOE
+    # X = np.fliplr(X).T
+    # Rotate image by 90 degrees clockwise - ONLY FOR VLAD
+    X = np.flipud(X).T
+    # This is common for all orientations (for now)
+    X = np.flip(X, axis=0)
     # Deal with orientation
     if X.dtype == np.complex128:
         X = np.angle(X)
@@ -40,23 +46,94 @@ def mat2nii(mat_file, nii_file=None, nii_lowres_file=None, downsample=0):
     X = np.nan_to_num(X)
     # save high-res NIFTI
     if nii_file is None:
-        nii_file = str(mat_file).replace('.mat', '.nii.gz')
-    save_nifti(X, nii_file)
+        nii_file = Path(str(mat_file).replace('.mat', '.nii.gz'))
+    else:
+        nii_file = Path(nii_file)
+    os.makedirs(nii_file.parent, exist_ok=True)
+    Image(X).save(nii_file)
+    update_header_info(nii_file, nii_file, seq_params)
 
     # Also output low res
     if downsample > 0 and nii_lowres_file is not None:
-        nii_lowres_file = nii_lowres_file.replace('.nii.gz', f'_downsample_{downsample}.nii.gz')
-        save_nifti(X[::downsample, ::downsample], nii_lowres_file)
+        nii_lowres_file = Path(str(nii_lowres_file).replace('.nii.gz', f'_downsample_{downsample}.nii.gz'))
+        os.makedirs(nii_lowres_file.parent, exist_ok=True)
+        Image(X[::downsample, ::downsample]).save(nii_lowres_file)
+        update_header_info(nii_lowres_file, nii_lowres_file, seq_params, downsample)
+    else:
+        nii_lowres_file = None
 
-    return Path(nii_file), Path(nii_lowres_file)
+    return nii_file, nii_lowres_file
 
 
-def save_nifti(data, filename):
-    # TODO pass args from function to Image
-    out_fd = Path(filename).parent
-    os.makedirs(out_fd, exist_ok=True)
-    Image(data).save(filename)
+def update_header_info(filename, out_filename, seq_params, downsample=1):
+    import nibabel as nib
+    from cmcmultimodal.core.utils import check_seq_params
 
+    # Read input information
+    seq_params = check_seq_params(seq_params)
+    orig_img = Image(filename)
+
+    # Create pixel dimension information
+    orig_pixel      = seq_params['in-plane resolution']
+    lr_pixel        = orig_pixel * downsample
+    slice_thickness = seq_params['out-of-plane resolution']
+    # Create voxel dimension matrix (2D images should have the first two non-zero dims)
+    voxdim = [lr_pixel, lr_pixel, slice_thickness]
+    matrix = np.diag([*voxdim, 1])
+    # Create appropriate Nifti header
+    hdr = nib.Nifti1Header()
+    hdr.set_xyzt_units(xyz='mm', t='sec')
+    hdr.set_sform(matrix, code=2)
+    # Save image file
+    os.makedirs(out_filename.parent, exist_ok=True)
+    Image(orig_img.data, xform=matrix, header=hdr).save(out_filename)
+
+
+def pad_all_slides(inp_path, out_path=None):
+    from cmcmultimodal.core.utils import pad_image
+
+    inp_path = Path(inp_path)
+    if out_path is None:
+        out_path = inp_path
+    else:
+        os.makedirs(out_path, exist_ok=True)
+
+    # find all valid files in input folder
+    image_files = sorted(inp_path.glob('Slice_*_En*.nii.gz'))
+    slide_numbers = [int(Path(f).name.split('_')[1]) for f in image_files]
+
+    slides_dict = {}
+    for sl, f in zip(slide_numbers, image_files):
+        # slide_range is inclusive
+        slides_dict[sl] = f  # slides_dict contains file names, not data
+
+    # find max shape of slides
+    ref_shape = find_max_shape(slides_dict)
+    print(f"New slide shape for zero-padding: {ref_shape}")
+    
+    # zero-pad all slides to max shape
+    for f in image_files:
+        img   = Image(f)
+        data  = pad_image(img.data[...,0], ref_shape)
+        Image(data[:,:,None], header=img.header).save(out_path / f.name)
+
+def find_max_shape(slides_dict):
+    # Independent function to find the max shape across slides, irrespective of zeroes
+    # Find the size of each slide
+    all_slides = np.sort(list(slides_dict.keys()))
+    max_size = 0
+    idx = None
+    for i, slide in enumerate(all_slides):
+        size = np.prod(Image(slides_dict[slide]).shape)
+        if size > max_size:
+            max_size = size
+            idx = i
+    if idx is None:
+        raise ValueError("All input images have zero size!")
+    else:
+        max_slide_shape = Image(slides_dict[all_slides[idx]]).shape
+    return max_slide_shape
+    
 
 def zeropad(filename, length=3, save=False):
     '''Zero pad the slice number in a filename of format:

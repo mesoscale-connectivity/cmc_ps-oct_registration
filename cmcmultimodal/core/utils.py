@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 '''
-Utility functions for CMC multimodal analysis
+Utility functions for CMC PS-OCT analysis
 
 Authors: Saad Jbabdi            <saad.jbabdi@ndcn.ox.ac.uk>
          Vasilis Karlaftis      <vasilis.karlaftis@ndcn.ox.ac.uk>
@@ -11,17 +11,27 @@ Copyright (C) 2025 University of Oxford
 # Helper Functions
 import numpy as np
 from matplotlib import pyplot as plt
-from numpy.fft import fft2, ifft2, ifftshift
 from fsl.data.image import Image
 from pathlib import Path
 from fsl.wrappers import flirt, LOAD
 
 
-def cross_correlate_2d(x, h):
-    """Calculate cross-correlation between 2D images using Fourier
-    """
-    h = ifftshift(ifftshift(h, axes=0), axes=1)
-    return ifft2(fft2(x) * np.conj(fft2(h))).real
+def check_seq_params(seq_params):
+    import json
+    # check if file exists and has a valid format
+    seq_file = Path(seq_params)
+    if not seq_file.is_file():
+        raise FileNotFoundError(f"{seq_file} file not found.")
+    try:
+        with open(seq_file, "r") as f:
+            seq_params = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format for {seq_file}: {e}")
+    # check if the file has the required fields
+    mandatory_keys = {'orientation', 'slice_order', 'in-plane resolution', 'out-of-plane resolution'}
+    if not mandatory_keys.issubset(seq_params):
+        raise ValueError(f"{seq_file} file does not contain all mandatory keys: {mandatory_keys}")
+    return seq_params
 
 
 def crop(x, s, axis):
@@ -32,12 +42,9 @@ def crop(x, s, axis):
         return x[:, start:start+s]
 
 
-# TODO investigate if this can be replaced by fslroi
 def pad_image(x_template, shape):
     """Zero-pad image to fit shape of a target image
     """
-    # Undo MariPenn's bad padding
-    # x_template = crop_zeros(x_template)
     # If pad_shape is smaller, crop
     if x_template.shape[0] > shape[0]:
         x_template = crop(x_template, shape[0], axis=0)
@@ -53,11 +60,13 @@ def pad_image(x_template, shape):
 
     return x_template_padded
 
+
 def save_padded_slides(slides, shape, hdr, out_fd):
     """Run and store zero-pad images for all slides
     """
     for sl in slides.keys():
-        img = get_image(slides, sl)
+        # TODO review if we want the get_image header
+        img, _ = get_image(slides, sl)
         img_padded = pad_image(img, shape)
         out_filename = Path(out_fd) / Path(slides[sl]).name
         Image(img_padded, xform=hdr.get_sform(), header=hdr).save(out_filename)
@@ -66,41 +75,16 @@ def save_padded_slides(slides, shape, hdr, out_fd):
     return slides
 
 
-def calc_shift(src, tgt, shape, thr=0):
-    """Calculate 2D translation that best aligns two images
-    """
-    src_padded = pad_image(src, shape)
-    tgt_padded = pad_image(tgt, shape)
-    CC = cross_correlate_2d(src_padded, tgt_padded)
-    peak = np.unravel_index(np.argmax(CC, axis=None), CC.shape)
-    t    = [-peak[0]+CC.shape[0]/2, -peak[1]+CC.shape[1]/2]
-    t[0] = t[0] if np.abs(t[0]) > thr else 0.
-    t[1] = t[1] if np.abs(t[1]) > thr else 0.
-    return np.array(t)
-
-
-def calc_flirt(src, tgt, shape, header, cost='corratio'):
+def calc_flirt(src, tgt, cost='corratio'):
     """Calculate 2D registration that best aligns two images
     """
-    import tempfile
-    # Pad input images to get them to the maximum size
-    src_padded = pad_image(src, shape)
-    tgt_padded = pad_image(tgt, shape)
-    # Store the padded images for flirt usage
-    _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
-    _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-    Image(src_padded, xform=header.get_sform(), header=header).save(src_filename)
-    Image(tgt_padded, xform=header.get_sform(), header=header).save(tgt_filename)
     # Run flirt 2D registration
-    out = flirt(src_filename,
-                tgt_filename,
+    out = flirt(src,
+                tgt,
                 omat=LOAD,
                 cost=cost,
                 twod=True)
-    # Delete temp files
-    Path.unlink(src_filename)
-    Path.unlink(tgt_filename)
-
+    
     return out['omat']
 
 
@@ -114,38 +98,15 @@ def plot_overlay(bckg, fore):
     plt.yticks([])
 
 
-def plot_shifts(slides, shifts, format='-'):
-    plt.figure()
-    plt.plot(slides, shifts, format)
-    plt.xlabel('Slide number (#)')
-    plt.ylabel('Shift [in pixels]')
-    plt.legend(['x-shift', 'y-shift'])
-    plt.show()
-
-
 def get_image(D, sl):
-    """Get image from slide dictionary
+    """Get 2D image from slide dictionary
     If filename provided, load it, otherwise, return the array
     """
     if isinstance(D[sl], str) or isinstance(D[sl], Path):
-        return Image(D[sl]).data[:, :, 0]
+        img = Image(D[sl])
+        return img.data.squeeze(), img.header #[..., 0]
+    elif isinstance(D[sl], np.ndarray):
+        return D[sl], None
     else:
-        # TODO add if D[sl] in np.array, otherwise raise an error
-        return D[sl]
+        raise ValueError(f"Unsupported data type: Image should be either an array or file, not {type(D[sl])}")
 
-
-def crop_zeros(X):
-    ymin = np.min(np.where(X[X.shape[0]//2, :] > 0)[0])
-    ymax = np.max(np.where(X[X.shape[0]//2, :] > 0)[0])
-    xmin = np.min(np.where(X[:, X.shape[1]//2] > 0)[0])
-    xmax = np.max(np.where(X[:, X.shape[1]//2] > 0)[0])
-    return X[xmin:xmax+1, ymin:ymax+1]
-
-
-def get_total_shift(all_shifts, sl, central_slide, first_slide=1):
-    """Add shifts all the way to central slide
-    """
-    if sl < central_slide:
-        return np.sum(all_shifts[sl-first_slide:central_slide-first_slide+1, :], axis=0)
-    else:
-        return np.sum(all_shifts[central_slide-first_slide:sl-first_slide+1, :], axis=0)

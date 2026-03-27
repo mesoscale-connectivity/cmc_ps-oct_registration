@@ -12,17 +12,14 @@ import os
 import json
 import numpy as np
 from pathlib import Path
-import nibabel as nib
-# import tempfile
-# import glob
+import shutil
 
-from cmcmultimodal.core.utils    import get_image, pad_image, calc_flirt#, save_padded_slides
+from cmcmultimodal.core.utils    import check_seq_params, get_image, calc_flirt
 from fsl.data.image              import Image
-from fsl.wrappers                import flirt, fnirt, applyxfm, invwarp#, LOAD
-from fsl.transform.flirt         import flirtMatrixToSform#, readFlirt, fromFlirt
-# from fsl.wrappers.avwutils       import fslsplit
+from fsl.wrappers                import flirt, fnirt, applyxfm, invwarp
+from fsl.transform.flirt         import flirtMatrixToSform
+from fsl.wrappers.fnirt          import applywarp
 import fsl.transform.affine as affine
-# from cmcmultimodal.core.io       import save_nifti
 import dask.multiprocessing
 import multiprocessing
 
@@ -33,9 +30,9 @@ NUM_CORES = min(8, multiprocessing.cpu_count() - 1)
 _UNSET = object()
 
 # Lookup table for orientation information
-OrientationLookup = {'sagittal': ' x', 'coronal':  'y', 'axial':  'z'}
+ORIENTATION_LOOKUP = {'sagittal': 'x', 'coronal': 'y', 'axial': 'z'}
 # FSL convention for orientation
-FSLconvention     = {'sagittal': 'LR', 'coronal': 'PA', 'axial': 'IS'}
+FSLCONVENTION      = {'sagittal': 'LR', 'coronal': 'PA', 'axial': 'IS'}
 
 # set relative path to fnirt config file
 fnirt_config = Path(os.path.dirname(__file__)).parent / 'config/fnirt_config'
@@ -67,7 +64,7 @@ class psoct:
         # check validity of seq_params file
         self._read_seq_params(seq_params)
         # run some "processing" during initialisation
-        self._find_all_slides(lowres=lowres)
+        self._find_all_slides(self.inp_path, lowres=lowres)
         # run slide_range setter after finding all the slides
         self.slide_range = slide_range
 
@@ -109,7 +106,6 @@ class psoct:
         self.bad_slides = []
         self.interpolated_slides = []
         self.ref_slide = 0
-        self.ref_shape = 0
         self.rel_mat = {}
         self.abs_mat = {}
         self.slide_deck = None
@@ -144,25 +140,9 @@ class psoct:
         if self.verbose:
             print('\tInput folder read successfully.')
 
-    def __check_seq_params(self, seq_params):
-        import json
-        # check if file exists and has a valid format
-        seq_file = Path(seq_params)
-        if not seq_file.is_file():
-            raise FileNotFoundError(f"{seq_file} file not found.")
-        try:
-            with open(seq_file, "r") as f:
-                self.seq_params = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON format for {seq_file}: {e}")
-        # check if the file has the required fields
-        mandatory_keys = {'orientation', 'slice_order', 'in-plane resolution', 'out-of-plane resolution'}
-        if not mandatory_keys.issubset(self.seq_params):
-            raise ValueError(f"{seq_file} file does not contain all mandatory keys: {mandatory_keys}")
-
     def _read_seq_params(self, seq_params):
         # check if JSON file is of a valid format
-        self.__check_seq_params(seq_params)
+        self.seq_params = check_seq_params(seq_params)
         # if all correct, read data orientation
         self.orientation = self.seq_params['orientation']
         # make orientation lowercase to account for potentially capitalising first letter
@@ -186,17 +166,17 @@ class psoct:
         if self.verbose:
             print('\tPSOCT sequence parameters read successfully.')
         # check if slice_order is compatible with FSL convention, otherwise reverse slides during processing
-        if slice_order != FSLconvention[self.orientation]:
+        if slice_order != FSLCONVENTION[self.orientation]:
             self.reverse_slides = True
 
-    def _find_all_slides(self, lowres=False):
+    def _find_all_slides(self, inp_path, lowres=False):
         # TODO this should get the 'lowres' folder and the filenames from the io.py functions
         if lowres:
-            self.image_files = sorted(self.inp_path.glob('lowres/' + 'Slice_*_En*.nii.gz'))
+            self.image_files = sorted(inp_path.glob('lowres/' + 'Slice_*_En*.nii.gz'))
             self.slide_res = 'lowres'
             self.downsample = 10
         else:
-            self.image_files = sorted(self.inp_path.glob('Slice_*_En*.nii.gz'))
+            self.image_files = sorted(inp_path.glob('Slice_*_En*.nii.gz'))
             self.slide_res = 'highres'
         # TODO: the specificity of the file format is interlinked with the io.py
         self.slide_numbers = [int(Path(f).name.split('_')[1]) for f in self.image_files]
@@ -229,18 +209,6 @@ class psoct:
             # If both are Inf (logically impossible but could happen if slide_numbers is empty), raise an error
             if np.isinf(before) and np.isinf(after):
                 raise ValueError(f"No available slide before or after missing slide {m}")
-            # # weights for averaging - not in use
-            # if not np.isinf(before) and not np.isinf(after) and before != after:
-            #     weights = np.array([m-before, after-m]) / (after-before)
-            # else:
-            #     weights = np.array([1.0, 0.0]) if np.abs(m-before) < np.abs(after-m) else np.array([0.0, 1.0])
-            # change weights to getting closest
-            # weights = np.round(weights)
-            # create average image (assumes they are the same shape!)
-            # TODO also assumes that these indices are part of the slides_dict
-            # img_before = Image( self.slides_dict[before] ).data[:,:,0]
-            # img_after  = Image( self.slides_dict[after] ).data[:,:,0]
-            # Slides_dict[m] = weights[0]*img_before + weights[1]*img_after
             if np.abs(m-before) < np.abs(after-m):
                 self.slides_dict[m] = self.image_files[np.where(slide_arr == before)[0][0]]
             else:
@@ -252,29 +220,12 @@ class psoct:
         # Find the size of each slide (excluding the interpolated ones)
         all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
         all_sizes = np.zeros(len(all_slides))
-        for slide in range(len(all_slides)):
-            all_sizes[slide] = np.count_nonzero(get_image(self.slides_dict, all_slides[slide]))
+        for i, slide in enumerate(all_slides):
+            all_sizes[i] = np.count_nonzero(get_image(self.slides_dict, slide)[0])
         # Find all slides that have max size and take the median as the central slide
         max_indices = np.where(all_sizes == np.max(all_sizes))[0]
         central_slide_num = all_slides[round(np.median(max_indices))]
         return central_slide_num
-
-    def _find_max_shape(self):
-        # Independent function to find the max shape across slides, irrespective of zeroes
-        # Find the size of each slide (excluding the interpolated ones)
-        all_slides = np.sort(list(set(self.slides_dict.keys()) - set(self.interpolated_slides)))
-        max_size = 0
-        idx = None
-        for slide in range(len(all_slides)):
-            size = np.prod(get_image(self.slides_dict, all_slides[slide]).shape)
-            if size > max_size:
-                max_size = size
-                idx = slide
-        if idx is None:
-            raise ValueError("All input images have zero size!")
-        else:
-            max_slide_shape = get_image(self.slides_dict, all_slides[idx]).shape
-        return max_slide_shape
 
     def _get_ref_slide(self, ref):
         if ref == 'centre':
@@ -285,8 +236,7 @@ class psoct:
             ref_slide = np.max(list(self.slides_dict.keys()))
         else:
             raise ValueError(f'Unexpected reference method {ref} for alignment.')
-        ref_shape = self._find_max_shape()
-        return ref_slide, ref_shape
+        return ref_slide
 
     def align(self, ref='centre'):
         ''' This method calculates the registration matrices between each slide and its neighbour.
@@ -296,28 +246,11 @@ class psoct:
         Parameters:
         - ref: reference mode for alignment ('centre' for using the central slide)
         '''
-        self.ref_slide, self.ref_shape = self._get_ref_slide(ref)
+        self.ref_slide = self._get_ref_slide(ref)
         if self.verbose:
-            print(f"\tReference slide for alignment: {self.ref_slide}, size={self.ref_shape}")
+            print(f"\tReference slide for alignment: {self.ref_slide}")
         # Use all slides for alignment (including interpolated ones)
         slides = sorted(list(self.slides_dict.keys()))
-
-        # create image default header
-        hdr = nib.Nifti1Header()
-        hdr.set_xyzt_units(xyz='mm', t='sec')
-        orig_pixel      = self.seq_params['in-plane resolution']
-        # TODO add if statement for lowres vs highres
-        lr_pixel        = orig_pixel * self.downsample
-        slice_thickness = self.seq_params['out-of-plane resolution']
-        voxdim = [lr_pixel, lr_pixel, slice_thickness]
-        matrix = np.diag([*voxdim, 1])
-        hdr.set_sform(matrix, code=2)
-
-        # # Pad slides
-        # os.makedirs(self.output_path / 'padded_slices', exist_ok=True)
-        # self.slides_dict = save_padded_slides(self.slides_dict, self.ref_shape, hdr, self.output_path / 'padded_slices')
-
-        # TODO for interpolated_slides the alignment could be skipped?
         dask.config.set(scheduler='processes', num_workers=NUM_CORES)
         jobs = []
         for sl in slides:
@@ -325,21 +258,25 @@ class psoct:
             if sl == self.ref_slide:
                 jobs.append(np.eye(4))
             else:
-                img = get_image(self.slides_dict, sl)
+                img = self.slides_dict[sl]
                 if sl < self.ref_slide:
-                    tgt = get_image(self.slides_dict, sl+1)
+                    tgt = self.slides_dict[sl+1]
                 else:
-                    tgt = get_image(self.slides_dict, sl-1)
-                # cost was 'leastsq' or 'normcorr' for Retardance reference
-                jobs.append(dask.delayed(calc_flirt)(img, tgt, self.ref_shape, hdr, cost='corratio'))
-                # jobs.append(dask.delayed(flirt)(img, tgt, omat=LOAD, cost='corratio', twod=True))
+                    tgt = self.slides_dict[sl-1]
+                if tgt == img:
+                    jobs.append(np.eye(4))
+                else:
+                    # cost was 'leastsq' or 'normcorr' for Retardance reference
+                    jobs.append(dask.delayed(calc_flirt)(img, tgt, cost='corratio'))
         tmp_results = dask.compute(jobs)[0]
-        # tmp_results = dask.compute(jobs)['omat'][0]
+        assert len(slides) == len(tmp_results)
         self.rel_mat = dict(zip(slides, tmp_results))
         # Calculate absolute transformation matrices
-        self._calc_total_mat(self.rel_mat)
+        self._calc_total_mat()
+        # save matrices to a text file
+        self._save_matrices()
 
-    def _calc_total_mat(self, rel_mat_dict):
+    def _calc_total_mat(self):
         slides = sorted(list(self.slides_dict.keys()))
         self.abs_mat = {self.ref_slide: np.eye(4)}
         # left side: propagate forward
@@ -351,115 +288,71 @@ class psoct:
         # sort the matrices by slide number
         self.abs_mat = dict(sorted(self.abs_mat.items()))
 
-    # def _create_slide_deck(self, downsample=1):
-    #     slide_deck = []
-    #     # we assume that abs_mat are sorted by slide number
-    #     for sl in self.abs_mat.keys():
-    #         img_padded = pad_image(get_image(self.slides_dict, sl), self.ref_shape)
-    #             _, src_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="source_")
-    #             _, tgt_filename = tempfile.mkstemp(suffix=".nii.gz", prefix="target_")
-    #             tgt_padded = pad_image(get_image(self.slides_dict, self.ref_slide), self.ref_shape)
-    #             # save_nifti(img_padded, src_filename)
-    #             # save_nifti(tgt_padded, tgt_filename)
-    #             hdr = nib.Nifti1Header()
-    #             hdr.set_xyzt_units(xyz='mm', t='sec')
-    #             orig_pixel      = self.seq_params['in-plane resolution']
-    #             # TODO add if statement for lowres vs highres
-    #             lr_pixel        = orig_pixel * self.downsample
-    #             slice_thickness = self.seq_params['out-of-plane resolution']
-    #             voxdim = [lr_pixel, lr_pixel, slice_thickness]
-    #             matrix = np.diag([*voxdim, 1])
-    #             hdr.set_sform(matrix, code=2)
-    #             Image(img_padded, xform=matrix, header=hdr).save(src_filename)
-    #             Image(tgt_padded, xform=matrix, header=hdr).save(tgt_filename)
-    #             img_padded = applyxfm(src_filename,
-    #                                   tgt_filename,
-    #                                   self.abs_mat[sl],
-    #                                   LOAD,
-    #                                   twod=True)
-    #             img_padded = img_padded['out'].get_fdata()
-    #             Path.unlink(src_filename)
-    #             Path.unlink(tgt_filename)
-    #         slide_deck.append(img_padded[::downsample, ::downsample])
-    #     # Stack images into a 3D array
-    #     slide_deck = np.stack(slide_deck, axis=2)
-    #     # Reorient slide deck to make coronal
-    #     if self.orientation == 'sagittal':
-    #         slide_deck = np.transpose(slide_deck, (2, 0, 1)).copy()
-    #         if self.reverse_slides:
-    #             slide_deck = np.flip(slide_deck, axis=0)
-    #     elif self.orientation == 'coronal':
-    #         slide_deck = np.transpose(slide_deck, (0, 2, 1)).copy()
-    #         if self.reverse_slides:
-    #             slide_deck = np.flip(slide_deck, axis=1)
-    #     elif self.orientation == 'axial':
-    #         # order of indices is already correct
-    #         if self.reverse_slides:
-    #             slide_deck = np.flip(slide_deck, axis=2)
-    #     else:
-    #         raise ValueError(f"Unexpected orientation value: {self.orientation}")
-    #     return slide_deck
-
-    def apply_registration(self, downsample=1):
-        # TODO add this in a separate function?
-        # Include pixel dimension in the header
-        orig_pixel      = self.seq_params['in-plane resolution']
-        lr_pixel        = orig_pixel * self.downsample
-        lr_pixel_down   = lr_pixel * downsample
-        slice_thickness = self.seq_params['out-of-plane resolution']
-        # Create voxel dimension matrix based on orientation
-        if self.orientation == 'sagittal':
-            voxdim = [slice_thickness, lr_pixel_down, lr_pixel_down]
-        elif self.orientation == 'coronal':
-            voxdim = [lr_pixel_down, slice_thickness, lr_pixel_down]
-        elif self.orientation == 'axial':
-            voxdim = [lr_pixel_down, lr_pixel_down, slice_thickness]
-        else:
-            raise ValueError(f"Unexpected orientation value: {self.orientation}")
-        matrix = np.diag([*voxdim, 1])
-        # Create appropriate Nifti header
-        hdr = nib.Nifti1Header()
-        hdr.set_xyzt_units(xyz='mm', t='sec')
-        hdr.set_sform(matrix, code=2)
-
+    def apply_registration(self):
         if self.verbose:
             print('\tCreating slide deck image ...', end=' ')
-        # slide_deck = self._create_slide_deck(downsample)
         dask.config.set(scheduler='processes', num_workers=NUM_CORES)
         jobs = []
-        os.makedirs(self.output_path / 'raw_slices', exist_ok=True)
-        os.makedirs(self.output_path / 'resampled_slices', exist_ok=True)
+        # create new 'raw_slices' and 'resampled_slices' folders if already exist
+        for fd in [self.output_path / 'raw_slices', self.output_path / 'resampled_slices']:
+            if fd.exists():
+                shutil.rmtree(fd)
+            os.makedirs(fd)
 
         # re-read input data if mri_reg_mod != psoct_reg_mod
         if self.mri_reg_mod != self.psoct_reg_mod:
             self.inp_path = self.inp_path / '..' / self.mri_reg_mod
             if self.verbose:
                 print("")
-            self._find_all_slides(self.slide_res=='lowres')
-            # self._find_missing_slides() # missing slides should be the same
+            self.slides_dict = {}
+            self._find_all_slides(self.inp_path, self.slide_res=='lowres')
+            self._find_missing_slides() # missing slides should be the same
             self._load_slides()
             self.interpolate_missing_slides()
 
-        def save_image(slides_dict, sl, ref_shape, ref_slide, tmp_matrix, header, abs_mat,
-                       slice_thickness, slide_range, output_path):
-            img_padded = pad_image(get_image(slides_dict, sl), ref_shape)
-            tgt_padded = pad_image(get_image(slides_dict, ref_slide), ref_shape)
-            # TODO remove header and re-check
-            src_filename = Image(img_padded, xform=tmp_matrix)
-            tgt_filename = Image(tgt_padded, xform=tmp_matrix)
+        def save_image(slides_dict, sl, ref_slide, abs_mat,
+                       orientation, slide_range, output_path):
+            src_filename = Image(slides_dict[sl])
+            tgt_filename = Image(slides_dict[ref_slide])
             xform = flirtMatrixToSform(abs_mat, srcImage=src_filename, refImage=tgt_filename)
-            P = np.array([[1,0,0,0],
-                        [0,0,1,0],
-                        [0,1,0,0],
-                        [0,0,0,1]])
+            if orientation == 'sagittal':
+                P = np.array([[0,0,1,0],
+                            [1,0,0,0],
+                            [0,1,0,0],
+                            [0,0,0,1]])
+            elif orientation == 'coronal':
+                P = np.array([[1,0,0,0],
+                            [0,0,1,0],
+                            [0,1,0,0],
+                            [0,0,0,1]])
+            elif orientation == 'axial':
+                P = np.eye(4)
             xform = P @ xform @ P.T
-            xform[1,-1] = slice_thickness * (slide_range[-1] - sl)
-            # TODO store the raw_filename in a class var to be reusable
+            if orientation == 'sagittal':
+                dim = 0
+            elif orientation == 'coronal':
+                dim = 1
+            elif orientation == 'axial':
+                dim = 2
+            if self.reverse_slides:
+                xform[dim,-1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
+            else:
+                xform[dim,-1] = src_filename.pixdim[2] * (sl - slide_range[0])
+            # update header with the updated xform
+            hdr = src_filename.header
+            hdr.set_sform(xform, code=2)
             raw_filename = output_path / 'raw_slices' / f'slide_{str(sl).zfill(3)}'
-            # TODO add orientation check
-            Image(img_padded[:,None,:], xform=xform, header=header).save(raw_filename)
+            data = Image(src_filename).data[...,0]
+            if orientation == 'sagittal':
+                Image(data[None,:,:], xform=xform, header=hdr).save(raw_filename)
+            elif self.orientation == 'coronal':
+                Image(data[:,None,:], xform=xform, header=hdr).save(raw_filename)
+            elif self.orientation == 'axial':
+                Image(data[:,:,None], xform=xform, header=hdr).save(raw_filename)
+            else:
+                raise ValueError(f"Unexpected orientation value: {orientation}")
+            # register and resample each slice for creating the slide deck
             res_filename = output_path / 'resampled_slices' / f'slide_{str(sl).zfill(3)}'
-            # TODO change this to fsl.utils.image.resample.resampleToReference?
             applyxfm(src_filename,
                      tgt_filename,
                      abs_mat,
@@ -468,27 +361,27 @@ class psoct:
                      usesqform=True)
 
         for sl in self.abs_mat.keys():
-            tmp_matrix = np.diag([*[lr_pixel, lr_pixel, slice_thickness], 1])
-            temp_hdr = hdr.copy()
-            # TODO review hdr vs temp_hdr usage
-            hdr.set_sform(tmp_matrix, code=2)
-            jobs.append(dask.delayed(save_image)(self.slides_dict, sl, self.ref_shape, self.ref_slide,
-                                                 tmp_matrix, temp_hdr, self.abs_mat[sl], slice_thickness,
+            jobs.append(dask.delayed(save_image)(self.slides_dict, sl, self.ref_slide,
+                                                 self.abs_mat[sl], self.orientation,
                                                  self.slide_range, self.output_path))
         dask.compute(jobs)
         slide_deck = []
         for sl in self.abs_mat.keys():
             out_filename = self.output_path / 'resampled_slices' / f'slide_{str(sl).zfill(3)}'
-            slide_deck.append(Image(out_filename).data[:,:,0])
+            slide_deck.append(Image(out_filename).data[...,0])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
+        hdr = Image(out_filename).header
+        voxdim = Image(out_filename).pixdim
         if self.orientation == 'sagittal':
             slide_deck = np.transpose(slide_deck, (2, 0, 1)).copy()
+            voxdim = (voxdim[2], voxdim[0], voxdim[1])
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=0)
         elif self.orientation == 'coronal':
             slide_deck = np.transpose(slide_deck, (0, 2, 1)).copy()
+            voxdim = (voxdim[0], voxdim[2], voxdim[1])
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=1)
         elif self.orientation == 'axial':
@@ -497,12 +390,13 @@ class psoct:
                 slide_deck = np.flip(slide_deck, axis=2)
         else:
             raise ValueError(f"Unexpected orientation value: {self.orientation}")
-        # TODO consider using io.save_nifti instead
-        self.slide_deck_img = Image(slide_deck, xform=matrix, header=hdr)
-        self.slide_deck = self.output_path / (self.mri_reg_mod[:3] + '_slide_deck')
+        xform = np.diag([*voxdim, 1])
+        hdr.set_sform(xform, code=2)
+        self.slide_deck_img = Image(slide_deck, xform=xform, header=hdr)
+        self.slide_deck = self.output_path / (self.mri_reg_mod + '_slide_deck')
         self.slide_deck_img.save(self.slide_deck)
-        # inp_files = sorted(glob.glob(str(out_filename.parent / 'slide*')), reverse=True)
-        # fslmerge('y', self.slide_deck, *inp_files)
+        # save slice position-to-number mapping
+        self._save_slice_mapping()
         if self.verbose:
             print('Done.')
 
@@ -513,7 +407,6 @@ class psoct:
             mri_ref_fullpath = self.mri_ref
         else:
             mri_ref_fullpath = self.inp_path.parent.parent / self.mri_ref
-        # mri_img = Image(mri_ref_fullpath)
         matfile = self.output_path / 'MRI_to_PSOCT.mat'
         # TODO this assumes the input has the .nii.gz suffix
         outfile = self.output_path / self.mri_ref.name.replace('.nii.gz', '_in_PSOCT')
@@ -540,7 +433,7 @@ class psoct:
             print('\tRunning PSOCT-to-MRI registration ...', end=' ')
 
         # perform alignment
-        outfile = self.output_path / (self.mri_reg_mod[:3] + '_slide_deck_in_MRI')
+        outfile = self.output_path / (self.mri_reg_mod + '_slide_deck_in_MRI')
         if nonlinear:
             field_file = self.output_path / 'PSOCT_to_MRI_warpfield.nii.gz'
             fnirt(src=self.slide_deck_img, ref=mri_ref_fullpath, iout=outfile, fout=field_file, aff=mat_file, config=fnirt_config, verbose=self.verbose)
@@ -564,94 +457,59 @@ class psoct:
         if self.verbose:
             print('Done.')
 
-    # def update_nifti_headers(self, slide_deck):
-    #     # Add header information to single slides
-    #     # This will be useful for visualising high resolution slides on top of the MRI
-
-    #     # First split the slide deck to get individual sides "correct" header
-    #     if self.orientation in OrientationLookup.keys():
-    #         indiv_slides = fslsplit(src=slide_deck, out=LOAD, dim=OrientationLookup[self.orientation])
-    #     else:
-    #         raise ValueError(f"Unexpected orientation value: {self.orientation}")
-
-    #     slide_numbers = sorted(list(self.slides_dict.keys()), reverse=self.reverse_slides)
-    #     split_numbers = sorted(list(indiv_slides.keys()))
-
-    #     def save_image(data, header, filename):
-    #         Image(data, header=header).save(filename)
-
-    #     dask.config.set(scheduler='processes', num_workers=NUM_CORES)
-    #     jobs = []
-    #     for sl, idx in zip(slide_numbers, split_numbers):
-    #         img = indiv_slides[idx]
-    #         # Get the relative path and update the slide number for the interpolated slides
-    #         rel_path = self.slides_dict[sl].relative_to(self.inp_path)
-    #         fileparts = rel_path.name.split('_')
-    #         fileparts[1] = str(sl).zfill(3)
-    #         rel_path = rel_path.parent / '_'.join(fileparts)
-    #         filename = self.output_path / self.mri_reg_mod / str(rel_path).replace('.nii.gz', '_hdr.nii.gz')
-    #         os.makedirs(filename.parent, exist_ok=True)
-    #         jobs.append(dask.delayed(save_image)(img.get_fdata(), img.header, filename))
-    #         indiv_slides[idx] = filename
-    #     if self.verbose:
-    #         print('\tUpdating headers for registration slides ...', end=' ')
-    #     dask.compute(jobs)
-    #     if self.verbose:
-    #         print(' Done.')
-    #     return indiv_slides
-
     def apply_to_lowres_images(self, other_images=['Retardance']):
         # Now apply this header to the low res images
         # Note: they need to be zero-padded first and shifted!!
 
-        # convert other_images to a list if not already
-        if not isinstance(other_images, list):
-            other_images = [other_images]
-
+        # TODO move this check in run_pipeline?
         if self.slide_res == 'highres':
             if self.verbose:
                 print("\tRegistration image is highres. Cannot apply to lowres images. Exiting...")
             return
 
         # run alignment across all modalities
-        def image_proc(file, filename, ref_shape, ref_slide, abs_mat, header, orientation,
-                        tmp_matrix, slice_thickness, slide_range, sl,
-                        output_path, slide_deck, mri_ref):
-            img = Image(file).data[:, :, 0]
-            # Zero-pad and shift
-            img_padded = pad_image(img, ref_shape)
-            tgt_padded = pad_image(Image(ref_slide).data[:, :, 0], ref_shape)
-            src_filename = Image(img_padded, xform=tmp_matrix)
-            tgt_filename = Image(tgt_padded, xform=tmp_matrix)
+        def image_proc(file, filename, ref_slide, abs_mat, 
+                       orientation, reverse_slides, slide_range, sl):
+            src_filename = Image(file)
+            tgt_filename = Image(ref_slide)
             # TODO add if self.slide_res=='lowres'?
             xform = flirtMatrixToSform(abs_mat, srcImage=src_filename, refImage=tgt_filename)
-            P = np.array([[1,0,0,0],
-                        [0,0,1,0],
-                        [0,1,0,0],
-                        [0,0,0,1]])
-            xform = P @ xform @ P.T
-            xform[1,-1] = slice_thickness * (slide_range[-1] - sl)
-
             if orientation == 'sagittal':
-                tgt_img = Image(img_padded[None, :, :], xform=xform, header=header)
+                P = np.array([[0,0,1,0],
+                            [1,0,0,0],
+                            [0,1,0,0],
+                            [0,0,0,1]])
             elif orientation == 'coronal':
-                tgt_img = Image(img_padded[:, None, :], xform=xform, header=header)
+                P = np.array([[1,0,0,0],
+                            [0,0,1,0],
+                            [0,1,0,0],
+                            [0,0,0,1]])
             elif orientation == 'axial':
-                tgt_img = Image(img_padded[:, :, None], xform=xform, header=header)
+                P = np.eye(4)
+            xform = P @ xform @ P.T
+            if orientation == 'sagittal':
+                dim = 0
+            elif orientation == 'coronal':
+                dim = 1
+            elif orientation == 'axial':
+                dim = 2
+            if reverse_slides:
+                xform[dim,-1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
+            else:
+                xform[dim,-1] = src_filename.pixdim[2] * (sl - slide_range[0])
+            # update header with the updated xform
+            hdr = src_filename.header
+            hdr.set_sform(xform, code=2)
+            
+            os.makedirs(filename.parent, exist_ok=True)
+            if orientation == 'sagittal':
+                Image(src_filename.data[None, :, :], xform=xform, header=hdr).save(filename)
+            elif orientation == 'coronal':
+                Image(src_filename.data[:, None, :], xform=xform, header=hdr).save(filename)
+            elif orientation == 'axial':
+                Image(src_filename.data[:, :, None], xform=xform, header=hdr).save(filename)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
-            
-            # readFlirt is just np.loadtxt
-            # mat = readFlirt(output_path / 'PSOCT_to_MRI.mat')
-            # # convert flirt matrix into a world->world transformation
-            # mat = fromFlirt(mat, Image(slide_deck), Image(mri_ref), from_='world', to='world')
-            # # concat is just matmul, i.e. '@'
-            # xform = affine.concat(mat, tgt_img.getAffine('voxel', 'world'))
-
-            # tgt_img.header.set_sform(matrix, code=2)
-
-            os.makedirs(filename.parent, exist_ok=True)
-            Image(tgt_img.data, xform=xform, header=header).save(filename)
 
         for mod in other_images:
 
@@ -678,38 +536,87 @@ class psoct:
                         print(f"\t\tUnexpected number of matching files: file number {sl}. Skipping this file.")
                     continue
 
-                ref_img = Image(self.output_path / 'raw_slices' / f'slide_{str(sl).zfill(3)}')
                 file = data_files[mod_idx[0]]
                 filename = self.output_path / mod / 'lowres' / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
 
-                orig_pixel = self.seq_params['in-plane resolution']
-                lr_pixel = orig_pixel * self.downsample
-                slice_thickness = self.seq_params['out-of-plane resolution']
-                tmp_matrix = np.diag([*[lr_pixel, lr_pixel, slice_thickness], 1])
-                
-                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, self.slides_dict[self.ref_slide], self.abs_mat[sl],
-                                                     ref_img.header, self.orientation,
-                                                     tmp_matrix, slice_thickness, self.slide_range, sl,
-                                                     self.output_path, self.slide_deck, self.mri_ref))
+                jobs.append(dask.delayed(image_proc)(file, filename, self.slides_dict[self.ref_slide], self.abs_mat[sl],
+                                                     self.orientation, self.reverse_slides, self.slide_range, sl))
             dask.compute(jobs)
             if self.verbose:
                 print(f"\tRegistration of '{mod}' slides completed.")
+
+    def create_lowres_slidedeck(self, other_images=['Retardance'], nonlinear=False):
+        import subprocess
+        from fsl.wrappers.avwutils  import fslmerge
+
+        # split reg slide deck for creating reference volumes for resampling
+        dim = ORIENTATION_LOOKUP[self.orientation]
+        split_folder = self.output_path / 'Ref_deck_split'
+        os.makedirs(split_folder, exist_ok=True)
+        subprocess.run(['fslsplit',
+                        self.slide_deck,
+                        split_folder / 'vol',
+                        '-' + dim])
+        ref_files = sorted(split_folder.glob('*.nii.gz'), reverse=True)
+
+        # create slidedeck in PSOCT space
+        for mod in other_images:
+            self.inp_path = self.inp_path / '..' / mod
+            out_file = self.output_path / (mod[0:3] + '_slide_deck')
+
+            if self.verbose:
+                print("")
+                print(f"Creating slide deck for {mod}...")
+
+            self.slides_dict = {}
+            self._find_all_slides(self.output_path / mod, self.slide_res=='lowres')
+            self._find_missing_slides()
+            self._load_slides()
+            self.interpolate_missing_slides()
+
+            # reorder slides and extract the filenames
+            inp_files = [v for _, v in sorted(self.slides_dict.items())]
+
+            os.makedirs(out_file.parent / (mod[0:3] +'_temp_files'), exist_ok=True)
+            jobs = []
+            # TODO need to determine when self.reverse_slides value matters
+            for idx, (inp, ref) in enumerate(zip(inp_files, ref_files), 1):
+                filename = 'vol_' + str(idx).zfill(3) + '.nii.gz'
+                out_filename = out_file.parent / (mod[0:3] + '_temp_files') / filename
+                # if slide is interpolated, then the target should match the original slide
+                if idx in self.missing_slides:
+                    orig_idx = int(Path(inp).name.split('_')[1]) - 1
+                    ref = ref_files[orig_idx]
+                jobs.append(dask.delayed(flirt)(inp, ref, out=out_filename, usesqform=True, applyxfm=True, twod=True))
+            dask.compute(jobs)
+            out_folder = out_file.parent / (mod[0:3] + '_temp_files')
+            out_files = sorted(out_folder.glob('*.nii.gz'), reverse=True)
+            fslmerge(ORIENTATION_LOOKUP[self.orientation], out_file, *out_files)
+            shutil.rmtree(out_folder)
+        
+        shutil.rmtree(split_folder)
+
+        # create slidedeck in MRI space
+        for mod in other_images:
+            inp_file = self.output_path / (mod[0:3] + '_slide_deck')
+            out_file = self.output_path / (mod[0:3] + '_slide_deck_in_MRI')
+            if nonlinear:
+                warp = self.output_path / 'PSOCT_to_MRI_warpfield.nii.gz'
+                applywarp(inp_file, self.mri_ref, out_file, warp=warp)
+            else:
+                mat = self.output_path / 'PSOCT_to_MRI.mat'
+                applyxfm(inp_file, self.mri_ref, mat, out_file)
+
+        if self.verbose:
+            print("Slide decks successfully created.")
 
     def apply_to_highres_images(self, other_images=['Retardance']):
         # TODO make this work even if slide_res=='highres'
         # Now apply this header to the high res images
 
-        # convert other_images to a list if not already
-        if not isinstance(other_images, list):
-            other_images = [other_images]
-
         # run alignment across all modalities
-        def image_proc(file, filename, ref_shape, ref_file, downsample, orientation):
-            img = Image(file).data[:, :, 0]
-            # TODO add if self.slide_res=='lowres'?
-            ref_shape = [x * downsample for x in ref_shape]
-            img_padded = pad_image(img, ref_shape)
-
+        def image_proc(file, filename, ref_file, downsample, orientation):
+            src_img = Image(file)
             ref_img = Image(ref_file)
             if orientation == 'sagittal':
                 newShape = [ref_img.shape[0], ref_img.shape[1]*downsample, ref_img.shape[2]*downsample]
@@ -724,16 +631,19 @@ class psoct:
             matrix   = affine.rescale(ref_img.shape, newShape, 'centre')
             matrix   = affine.concat(ref_img.voxToWorldMat, matrix)
 
+            # update header with the updated xform
+            hdr = ref_img.header
+            hdr.set_sform(matrix, code=2)
+
+            os.makedirs(filename.parent, exist_ok=True)
             if orientation == 'sagittal':
-                img_highres = Image(img_padded[None, :, :], xform=matrix, header=ref_img.header)
+                Image(src_img.data[None, :, :], xform=matrix, header=hdr).save(filename)
             elif orientation == 'coronal':
-                img_highres = Image(img_padded[:, None, :], xform=matrix, header=ref_img.header)
+                Image(src_img.data[:, None, :], xform=matrix, header=hdr).save(filename)
             elif orientation == 'axial':
-                img_highres = Image(img_padded[:, :, None], xform=matrix, header=ref_img.header)
+                Image(src_img.data[:, :, None], xform=matrix, header=hdr).save(filename)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
-            os.makedirs(filename.parent, exist_ok=True)
-            img_highres.save(filename)
 
         # run alignment across all modalities
         for mod in other_images:
@@ -770,7 +680,7 @@ class psoct:
 
                 filename = self.output_path / mod / str(file.name).replace('.nii.gz', '_hdr.nii.gz')
 
-                jobs.append(dask.delayed(image_proc)(file, filename, self.ref_shape, ref_file,
+                jobs.append(dask.delayed(image_proc)(file, filename, ref_file,
                                                      self.downsample, self.orientation))
             dask.compute(jobs)
             if self.verbose:
@@ -783,13 +693,33 @@ class psoct:
             json.dump({int(k): v.tolist() for k, v in self.rel_mat.items()}, f)
         if self.verbose:
             print('\tRelative and absolute transformation matrices saved.')
+    
+    def _save_slice_mapping(self):
+        if not self.slides_dict:
+            return {}
+        # create new dict
+        new_dict = {}
+        for k, v in self.slides_dict.items():
+            # keep only first two segments of filename + _hdr extension
+            val = "_".join(v.name.split('_')[0:2]) + '_*_hdr.nii.gz'
+            # change dict keys to have the smallest value equal to 0
+            new_dict[k - min(self.slides_dict.keys())] = val
+        # reverse key order if slides are opposite to FSL convention
+        if self.reverse_slides:
+            new_dict = {max(new_dict.keys()) - k: v for k, v in new_dict.items()}
+        # reorder keys to be in increasing order
+        new_dict = dict(sorted(new_dict.items()))
+        # save new dict in file
+        with open(self.output_path / "slidedeck_slice_mapping.json", "w") as f:
+            json.dump({k: v for k, v in new_dict.items()}, f, indent=2)
+        if self.verbose:
+            print('\tSlice position-to-number mapping saved.')
 
     # Function to be called for flirt version of the pipeline
     def run_pipeline(self,
                      other_images,
                      output_path,
                      mri_ref,
-                     downsample=1,
                      bad_slides=None,
                      fnirt=False,
                      align_ref='centre',
@@ -799,31 +729,30 @@ class psoct:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
         self.interpolate_missing_slides()
+        self.output_path = Path(output_path)
+        self.mri_ref = Path(mri_ref)
+        os.makedirs(self.output_path, exist_ok=True)
         self.align(ref=align_ref)
         if self.verbose:
             print('Slide registration completed.')
         if self.verbose:
             print('\nStarting slide deck creation ...')
-        # TODO consider moving the next two lines into apply_registration
-        self.output_path = Path(output_path)
-        os.makedirs(self.output_path, exist_ok=True)
-        # save matrices to a text file
-        self._save_matrices()
+        # save slide decks and header information
+        self.apply_registration()
         # save a copy of the mri_ref in the output folder
-        self.mri_ref = Path(mri_ref)
         if ref_copy:
-            import shutil
             shutil.copyfile(self.mri_ref, self.output_path / self.mri_ref.name)
             self.mri_ref = self.output_path / self.mri_ref.name
-        # save slide decks and header information
-        self.apply_registration(downsample=downsample)
         matfile, _ = self.align_mri_to_psoct()
-        psoct_to_mri_file = self.align_psoct_to_mri(matfile, fnirt)
+        _ = self.align_psoct_to_mri(matfile, fnirt)
         if inv_warp and fnirt:
             self.invert_warpfield()
-        # indiv_slides = self.update_nifti_headers(psoct_to_mri_file)
         # TODO make sure these work for highres reference too!
+        # convert other_images to a list if not already
+        if not isinstance(other_images, list):
+            other_images = [other_images]
         self.apply_to_lowres_images(other_images)
+        self.create_lowres_slidedeck(other_images, fnirt)
         self.apply_to_highres_images(other_images)
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")

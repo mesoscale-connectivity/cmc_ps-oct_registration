@@ -29,7 +29,6 @@ def run_psoct_pipeline(
     align_ref='centre',
     psoct_reg_mod='Cross',
     mri_reg_mod='Retardance',
-    reg_downsample=1,
     other_images=['Retardance', 'Cross'],
     verbose=False):
 
@@ -43,10 +42,9 @@ def run_psoct_pipeline(
                verbose=verbose)
 
     # Run pipeline
-    _ = ps.run_pipeline(other_images=other_images,
+    ps.run_pipeline(other_images=other_images,
                         output_path=out_path,
                         mri_ref=mri_ref,
-                        downsample=reg_downsample,
                         bad_slides=bad_slides,
                         fnirt=fnirt,
                         align_ref=align_ref,
@@ -76,7 +74,6 @@ def parse_cli_args():
     optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, metavar='SLIDE_NO', help="List of bad slide numbers to skip")
 
     optional.add_argument('--align_ref', type=str, default='centre', choices=['centre', 'first', 'last'], help="Reference slide for alignment")
-    optional.add_argument('--reg_downsample', type=int, default=1, help="Downsample factor for the slide deck")
     optional.add_argument('-v', '--verbose',  action='store_true', help="Print diagnostic information while running")
 
     return parser.parse_args()
@@ -100,7 +97,6 @@ def main():
         align_ref       = args.align_ref,
         psoct_reg_mod   = args.psoct_reg_modality,
         mri_reg_mod     = args.mri_reg_modality,
-        reg_downsample  = args.reg_downsample,
         other_images    = args.other_images,
         verbose         = args.verbose
     )

@@ -568,6 +568,7 @@ class psoct:
                 print("")
                 print(f"Creating slide deck for {mod}...")
 
+            # TODO consider the following methods to return dict as output, so we don't overwrite it
             self.slides_dict = {}
             self._find_all_slides(self.output_path / mod, self.slide_res=='lowres')
             self._find_missing_slides()
@@ -752,7 +753,8 @@ class psoct:
         if not isinstance(other_images, list):
             other_images = [other_images]
         self.apply_to_lowres_images(other_images)
-        self.create_lowres_slidedeck(other_images, fnirt)
         self.apply_to_highres_images(other_images)
+        # TODO update next function to not overwrite initial variables
+        self.create_lowres_slidedeck(other_images, fnirt)
         if self.verbose:
             print(f"\nPSOCT pipeline completed and results saved to {self.output_path}")

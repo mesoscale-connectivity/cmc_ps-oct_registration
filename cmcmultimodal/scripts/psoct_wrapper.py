@@ -25,7 +25,7 @@ def run_psoct_pipeline(
     slide_range=None,
     bad_slides=None,
     fnirt=False,
-    inv_warp=False,
+    invwarp=False,
     align_ref='centre',
     psoct_reg_mod='Cross',
     mri_reg_mod='Retardance',
@@ -48,7 +48,7 @@ def run_psoct_pipeline(
                         bad_slides=bad_slides,
                         fnirt=fnirt,
                         align_ref=align_ref,
-                        inv_warp=inv_warp
+                        invwarp=invwarp
     )
 
 def parse_cli_args():
@@ -68,7 +68,7 @@ def parse_cli_args():
     # ---- Optional arguments group ----
     optional = parser.add_argument_group("Optional arguments")
     optional.add_argument('--highres', action='store_true', help="Use high-resolution data for alignment (default: False)")
-    optional.add_argument('--non_linear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
+    optional.add_argument('--nonlinear', action='store_true', help='Apply non-linear (FNIRT) registration to MRI reference (default: False)')
     optional.add_argument('--invwarp',    action='store_true', help='For non-linear registration, invert the warp field (default: False)')
     optional.add_argument('--slide_range', type=int, nargs=2, default=None, metavar=('START', 'END'), help="Range of slides to process (start end)")
     optional.add_argument('--bad_slides',  type=int, nargs='*', default=None, metavar='SLIDE_NO', help="List of bad slide numbers to skip")
@@ -92,8 +92,8 @@ def main():
         lowres          = (not args.highres),
         slide_range     = tuple(args.slide_range) if args.slide_range else None,
         bad_slides      = args.bad_slides,
-        fnirt           = args.non_linear,
-        inv_warp        = args.invwarp,
+        fnirt           = args.nonlinear,
+        invwarp         = args.invwarp,
         align_ref       = args.align_ref,
         psoct_reg_mod   = args.psoct_reg_modality,
         mri_reg_mod     = args.mri_reg_modality,

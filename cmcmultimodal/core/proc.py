@@ -294,6 +294,7 @@ class psoct:
         dask.config.set(scheduler='processes', num_workers=NUM_CORES)
         jobs = []
         # create new 'raw_slices' and 'resampled_slices' folders if already exist
+        # TODO add cleanup of these folders when no longer needed
         for fd in [self.output_path / 'raw_slices', self.output_path / 'resampled_slices']:
             if fd.exists():
                 shutil.rmtree(fd)
@@ -725,7 +726,7 @@ class psoct:
                      fnirt=False,
                      align_ref='centre',
                      ref_copy=True,
-                     inv_warp=False):
+                     invwarp=False):
         if self.verbose:
             print('\nStarting slide registration process ...')
         self.label_bad_slides(indices=bad_slides)
@@ -746,7 +747,7 @@ class psoct:
             self.mri_ref = self.output_path / self.mri_ref.name
         matfile, _ = self.align_mri_to_psoct()
         _ = self.align_psoct_to_mri(matfile, fnirt)
-        if inv_warp and fnirt:
+        if invwarp and fnirt:
             self.invert_warpfield()
         # TODO make sure these work for highres reference too!
         # convert other_images to a list if not already

@@ -21,8 +21,8 @@ psoct_wrapper --inp_path INP_PATH
               --other_images Retardance Orientation
               --slide_range 98 200
               --bad_slides 140
-              --non_linear
-              --inv_warp
+              --nonlinear
+              --invwarp
               --verbose
 ```
 

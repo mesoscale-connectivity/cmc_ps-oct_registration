@@ -1,0 +1,3 @@
+[submodule "cmc_zarr_tools"]
+	path = cmc_zarr_tools
+	url = https://github.com/vkarlaftis/cmc_zarr_tools.git

@@ -82,9 +82,9 @@ def calc_flirt(src, tgt, cost='corratio'):
     out = flirt(src,
                 tgt,
                 omat=LOAD,
-                cost=cost,
+                cost=cost.lower(),
                 twod=True)
-    
+
     return out['omat']
 
 
@@ -104,9 +104,8 @@ def get_image(D, sl):
     """
     if isinstance(D[sl], str) or isinstance(D[sl], Path):
         img = Image(D[sl])
-        return img.data.squeeze(), img.header #[..., 0]
+        return img.data.squeeze(), img.header
     elif isinstance(D[sl], np.ndarray):
         return D[sl], None
     else:
         raise ValueError(f"Unsupported data type: Image should be either an array or file, not {type(D[sl])}")
-

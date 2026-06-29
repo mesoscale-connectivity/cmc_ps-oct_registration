@@ -14,7 +14,7 @@
 --infwhm=4,3,2,1.5,1,0.5
 #       FWHM (in mm) of gaussian smoothing kernel for ref volume, default 4,2,0,0
 --reffwhm=4,3,2,1.5,1,0.5
-#       Weigth of membrane energy regularisation, default depending on --ssqlambda and --regmod switches. See user documetation.
+#       Weight of membrane energy regularisation, default depending on --ssqlambda and --regmod switches. See user documentation.
 --lambda=300,150,100,50,40,30
 #       Estimate intensity-mapping if set, deafult 1 (true)
 --estint=1,1,1,1,1,0

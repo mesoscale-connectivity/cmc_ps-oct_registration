@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 
 
-def _compare_images(ref, est):
+def _compare_images(ref, est, atol=1e-8):
     ref_img = Image(ref)
     est_img = Image(est)
 
     if not ref_img.data.shape == est_img.data.shape:
         print('-', ref.name, ': Image size is NOT equal!')
-    elif not np.allclose(ref_img.data, est_img.data):
+    elif not np.allclose(ref_img.data, est_img.data, atol=atol):
         print('-', ref.name, ': Image data are NOT equal!')
     elif ref_img.header != est_img.header:
         print('-', ref.name, ': Headers are NOT equal!')
@@ -66,10 +66,16 @@ def compare_results_folder(ref_path, est_path, subdir=False):
     ref_path = Path(ref_path)
     est_path = Path(est_path)
     for file in ref_path.glob('*'):
+        if file.name.startswith('.'):
+            continue
         if subdir and file.is_dir():
             for subfile in file.glob('*'):
+                if file.name.startswith('.'):
+                    continue
                 if subfile.is_dir():
                     for subsubfile in subfile.glob('*'):
+                        if file.name.startswith('.'):
+                            continue
                         corresponding_est_file = est_path / file.name / subfile.name / subsubfile.name
                         __run_subfile_code(subsubfile, corresponding_est_file)
                 else:

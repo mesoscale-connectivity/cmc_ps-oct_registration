@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmcmultimodal"
-version = "0.2.0"
+version = "0.2.1"
 description = "Tools for processing CMC multimodal data."
 authors = [
     {name="Saad Jbabdi", email="saad.jbabdi@ndcn.ox.ac.uk"},
@@ -31,6 +31,12 @@ dependencies = [
     "scipy",
     "fslpy",
     "matplotlib"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "flake8"
 ]
 
 [project.scripts]

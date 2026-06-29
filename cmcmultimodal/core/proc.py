@@ -114,7 +114,8 @@ class psoct:
     def _find_missing_slides(self):
         '''Get list of missing slides.'''
         if (self.slide_range is not None) and (self.slide_numbers is not None):
-            self.missing_slides = list(set(np.arange(min(self.slide_range), max(self.slide_range)+1)) - set(self.slide_numbers))
+            self.missing_slides = list(set(np.arange(min(self.slide_range), max(self.slide_range)+1))
+                                       - set(self.slide_numbers))
             self.missing_slides = list(map(int, self.missing_slides))
             if self.verbose and len(self.missing_slides) > 0:
                 print(f"\tFound {len(self.missing_slides)} missing slides: {self.missing_slides}")
@@ -162,7 +163,8 @@ class psoct:
             if slice_order not in {'SI', 'IS'}:
                 raise ValueError(f"Unexpected 'slice_order' value: {slice_order}. Expected 'SI' or 'IS'.")
         else:
-            raise ValueError(f"Unexpected orientation value: {self.orientation}. Expected 'sagittal', 'coronal' or 'axial'.")
+            raise ValueError(f"Unexpected orientation value: {self.orientation}. "
+                             "Expected 'sagittal', 'coronal' or 'axial'.")
         if self.verbose:
             print('\tPSOCT sequence parameters read successfully.')
         # check if slice_order is compatible with FSL convention, otherwise reverse slides during processing
@@ -228,6 +230,7 @@ class psoct:
         return central_slide_num
 
     def _get_ref_slide(self, ref):
+        ref = ref.lower()
         if ref == 'centre':
             ref_slide = self._find_central_slide()
         elif ref == 'first':
@@ -306,8 +309,8 @@ class psoct:
             if self.verbose:
                 print("")
             self.slides_dict = {}
-            self._find_all_slides(self.inp_path, self.slide_res=='lowres')
-            self._find_missing_slides() # missing slides should be the same
+            self._find_all_slides(self.inp_path, self.slide_res == 'lowres')
+            self._find_missing_slides()  # missing slides should be the same
             self._load_slides()
             self.interpolate_missing_slides()
 
@@ -316,16 +319,17 @@ class psoct:
             src_filename = Image(slides_dict[sl])
             tgt_filename = Image(slides_dict[ref_slide])
             xform = flirtMatrixToSform(abs_mat, srcImage=src_filename, refImage=tgt_filename)
+            orientation = orientation.lower()
             if orientation == 'sagittal':
-                P = np.array([[0,0,1,0],
-                            [1,0,0,0],
-                            [0,1,0,0],
-                            [0,0,0,1]])
+                P = np.array([[0, 0, 1, 0],
+                              [1, 0, 0, 0],
+                              [0, 1, 0, 0],
+                              [0, 0, 0, 1]])
             elif orientation == 'coronal':
-                P = np.array([[1,0,0,0],
-                            [0,0,1,0],
-                            [0,1,0,0],
-                            [0,0,0,1]])
+                P = np.array([[1, 0, 0, 0],
+                             [0, 0, 1, 0],
+                             [0, 1, 0, 0],
+                             [0, 0, 0, 1]])
             elif orientation == 'axial':
                 P = np.eye(4)
             xform = P @ xform @ P.T
@@ -336,20 +340,20 @@ class psoct:
             elif orientation == 'axial':
                 dim = 2
             if self.reverse_slides:
-                xform[dim,-1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
+                xform[dim, -1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
             else:
-                xform[dim,-1] = src_filename.pixdim[2] * (sl - slide_range[0])
+                xform[dim, -1] = src_filename.pixdim[2] * (sl - slide_range[0])
             # update header with the updated xform
-            hdr = src_filename.header
+            hdr = src_filename.header.copy()
             hdr.set_sform(xform, code=2)
             raw_filename = output_path / 'raw_slices' / f'slide_{str(sl).zfill(3)}'
-            data = Image(src_filename).data[...,0]
+            data = Image(src_filename).data[..., 0]
             if orientation == 'sagittal':
-                Image(data[None,:,:], xform=xform, header=hdr).save(raw_filename)
-            elif self.orientation == 'coronal':
-                Image(data[:,None,:], xform=xform, header=hdr).save(raw_filename)
-            elif self.orientation == 'axial':
-                Image(data[:,:,None], xform=xform, header=hdr).save(raw_filename)
+                Image(data[None, :, :], xform=xform, header=hdr).save(raw_filename)
+            elif orientation == 'coronal':
+                Image(data[:, None, :], xform=xform, header=hdr).save(raw_filename)
+            elif orientation == 'axial':
+                Image(data[:, :, None], xform=xform, header=hdr).save(raw_filename)
             else:
                 raise ValueError(f"Unexpected orientation value: {orientation}")
             # register and resample each slice for creating the slide deck
@@ -369,23 +373,23 @@ class psoct:
         slide_deck = []
         for sl in self.abs_mat.keys():
             out_filename = self.output_path / 'resampled_slices' / f'slide_{str(sl).zfill(3)}'
-            slide_deck.append(Image(out_filename).data[...,0])
+            slide_deck.append(Image(out_filename).data[..., 0])
         # Stack images into a 3D array
         slide_deck = np.stack(slide_deck, axis=2)
         # Reorient slide deck to make coronal
-        hdr = Image(out_filename).header
+        hdr = Image(out_filename).header.copy()
         voxdim = Image(out_filename).pixdim
-        if self.orientation == 'sagittal':
+        if self.orientation.lower() == 'sagittal':
             slide_deck = np.transpose(slide_deck, (2, 0, 1)).copy()
             voxdim = (voxdim[2], voxdim[0], voxdim[1])
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=0)
-        elif self.orientation == 'coronal':
+        elif self.orientation.lower() == 'coronal':
             slide_deck = np.transpose(slide_deck, (0, 2, 1)).copy()
             voxdim = (voxdim[0], voxdim[2], voxdim[1])
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=1)
-        elif self.orientation == 'axial':
+        elif self.orientation.lower() == 'axial':
             # order of indices is already correct
             if self.reverse_slides:
                 slide_deck = np.flip(slide_deck, axis=2)
@@ -413,11 +417,13 @@ class psoct:
         outfile = self.output_path / self.mri_ref.name.replace('.nii.gz', '_in_PSOCT')
         if self.verbose:
             print('\tRunning MRI-to-PSOCT registration ...', end=' ')
+        # TODO remove 'out' file as the registration could be nonlinear later
         flirt(src=mri_ref_fullpath, ref=self.slide_deck, out=outfile, omat=matfile, dof=12, interp='spline')
         if self.verbose:
             print('Done.')
         return matfile, outfile
 
+    # TODO review if these methods need to return output files
     def align_psoct_to_mri(self, matfile, nonlinear=False):
         # invert and save tranformation matrix
         mat      = np.loadtxt(matfile)
@@ -434,10 +440,12 @@ class psoct:
             print('\tRunning PSOCT-to-MRI registration ...', end=' ')
 
         # perform alignment
-        outfile = self.output_path / (self.mri_reg_mod + '_slide_deck_in_MRI')
+        outfile = str(self.slide_deck) + '_in_MRI'
         if nonlinear:
             field_file = self.output_path / 'PSOCT_to_MRI_warpfield.nii.gz'
-            fnirt(src=self.slide_deck_img, ref=mri_ref_fullpath, iout=outfile, fout=field_file, aff=mat_file, config=fnirt_config, verbose=self.verbose)
+            coeff_file = self.output_path / 'PSOCT_to_MRI_warpcoeff.nii.gz'
+            fnirt(src=self.slide_deck_img, ref=mri_ref_fullpath, iout=outfile, fout=field_file,
+                  cout=coeff_file, aff=mat_file, config=fnirt_config, verbose=self.verbose)
         else:
             xform = flirtMatrixToSform(mat_inv, srcImage=self.slide_deck_img, refImage=Image(mri_ref_fullpath))
             Image(self.slide_deck_img.data, xform=xform).save(outfile)
@@ -446,7 +454,7 @@ class psoct:
             print('Done.')
 
         return outfile
-    
+
     def invert_warpfield(self):
         if self.verbose:
             print('\tInverting warpfield ...', end=' ')
@@ -469,22 +477,23 @@ class psoct:
             return
 
         # run alignment across all modalities
-        def image_proc(file, filename, ref_slide, abs_mat, 
+        def image_proc(file, filename, ref_slide, abs_mat,
                        orientation, reverse_slides, slide_range, sl):
             src_filename = Image(file)
             tgt_filename = Image(ref_slide)
             # TODO add if self.slide_res=='lowres'?
             xform = flirtMatrixToSform(abs_mat, srcImage=src_filename, refImage=tgt_filename)
+            orientation = orientation.lower()
             if orientation == 'sagittal':
-                P = np.array([[0,0,1,0],
-                            [1,0,0,0],
-                            [0,1,0,0],
-                            [0,0,0,1]])
+                P = np.array([[0, 0, 1, 0],
+                              [1, 0, 0, 0],
+                              [0, 1, 0, 0],
+                              [0, 0, 0, 1]])
             elif orientation == 'coronal':
-                P = np.array([[1,0,0,0],
-                            [0,0,1,0],
-                            [0,1,0,0],
-                            [0,0,0,1]])
+                P = np.array([[1, 0, 0, 0],
+                              [0, 0, 1, 0],
+                              [0, 1, 0, 0],
+                              [0, 0, 0, 1]])
             elif orientation == 'axial':
                 P = np.eye(4)
             xform = P @ xform @ P.T
@@ -495,13 +504,13 @@ class psoct:
             elif orientation == 'axial':
                 dim = 2
             if reverse_slides:
-                xform[dim,-1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
+                xform[dim, -1] = src_filename.pixdim[2] * (slide_range[-1] - sl)
             else:
-                xform[dim,-1] = src_filename.pixdim[2] * (sl - slide_range[0])
+                xform[dim, -1] = src_filename.pixdim[2] * (sl - slide_range[0])
             # update header with the updated xform
-            hdr = src_filename.header
+            hdr = src_filename.header.copy()
             hdr.set_sform(xform, code=2)
-            
+
             os.makedirs(filename.parent, exist_ok=True)
             if orientation == 'sagittal':
                 Image(src_filename.data[None, :, :], xform=xform, header=hdr).save(filename)
@@ -571,7 +580,7 @@ class psoct:
 
             # TODO consider the following methods to return dict as output, so we don't overwrite it
             self.slides_dict = {}
-            self._find_all_slides(self.output_path / mod, self.slide_res=='lowres')
+            self._find_all_slides(self.output_path / mod, self.slide_res == 'lowres')
             self._find_missing_slides()
             self._load_slides()
             self.interpolate_missing_slides()
@@ -579,7 +588,11 @@ class psoct:
             # reorder slides and extract the filenames
             inp_files = [v for _, v in sorted(self.slides_dict.items())]
 
-            os.makedirs(out_file.parent / (mod[0:3] +'_temp_files'), exist_ok=True)
+            if mod.lower() == 'orientation':
+                interp = 'nearestneighbour'
+            else:
+                interp = 'trilinear'
+            os.makedirs(out_file.parent / (mod[0:3] + '_temp_files'), exist_ok=True)
             jobs = []
             # TODO need to determine when self.reverse_slides value matters
             for idx, (inp, ref) in enumerate(zip(inp_files, ref_files), 1):
@@ -589,13 +602,14 @@ class psoct:
                 if idx in self.missing_slides:
                     orig_idx = int(Path(inp).name.split('_')[1]) - 1
                     ref = ref_files[orig_idx]
-                jobs.append(dask.delayed(flirt)(inp, ref, out=out_filename, usesqform=True, applyxfm=True, twod=True))
+                jobs.append(dask.delayed(flirt)(inp, ref, out=out_filename, interp=interp,
+                                                usesqform=True, applyxfm=True, twod=True))
             dask.compute(jobs)
             out_folder = out_file.parent / (mod[0:3] + '_temp_files')
             out_files = sorted(out_folder.glob('*.nii.gz'), reverse=True)
             fslmerge(ORIENTATION_LOOKUP[self.orientation], out_file, *out_files)
             shutil.rmtree(out_folder)
-        
+
         shutil.rmtree(split_folder)
 
         # create slidedeck in MRI space
@@ -620,6 +634,7 @@ class psoct:
         def image_proc(file, filename, ref_file, downsample, orientation):
             src_img = Image(file)
             ref_img = Image(ref_file)
+            orientation = orientation.lower()
             if orientation == 'sagittal':
                 newShape = [ref_img.shape[0], ref_img.shape[1]*downsample, ref_img.shape[2]*downsample]
             elif orientation == 'coronal':
@@ -634,7 +649,7 @@ class psoct:
             matrix   = affine.concat(ref_img.voxToWorldMat, matrix)
 
             # update header with the updated xform
-            hdr = ref_img.header
+            hdr = ref_img.header.copy()
             hdr.set_sform(matrix, code=2)
 
             os.makedirs(filename.parent, exist_ok=True)
@@ -695,7 +710,7 @@ class psoct:
             json.dump({int(k): v.tolist() for k, v in self.rel_mat.items()}, f)
         if self.verbose:
             print('\tRelative and absolute transformation matrices saved.')
-    
+
     def _save_slice_mapping(self):
         if not self.slides_dict:
             return {}
@@ -745,10 +760,13 @@ class psoct:
         if ref_copy:
             shutil.copyfile(self.mri_ref, self.output_path / self.mri_ref.name)
             self.mri_ref = self.output_path / self.mri_ref.name
-        matfile, _ = self.align_mri_to_psoct()
+        matfile, mri_in_psoct = self.align_mri_to_psoct()
         _ = self.align_psoct_to_mri(matfile, fnirt)
         if invwarp and fnirt:
             self.invert_warpfield()
+            # overwrite the previously linearly aligned reference
+            applywarp(self.mri_ref, self.slide_deck, mri_in_psoct,
+                      warp=self.output_path / 'MRI_to_PSOCT_warpfield.nii.gz')
         # TODO make sure these work for highres reference too!
         # convert other_images to a list if not already
         if not isinstance(other_images, list):

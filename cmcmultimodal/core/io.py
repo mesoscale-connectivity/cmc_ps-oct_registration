@@ -110,12 +110,13 @@ def pad_all_slides(inp_path, out_path=None):
     # find max shape of slides
     ref_shape = find_max_shape(slides_dict)
     print(f"New slide shape for zero-padding: {ref_shape}")
-    
+
     # zero-pad all slides to max shape
     for f in image_files:
         img   = Image(f)
-        data  = pad_image(img.data[...,0], ref_shape)
-        Image(data[:,:,None], header=img.header).save(out_path / f.name)
+        data  = pad_image(img.data[..., 0], ref_shape)
+        Image(data[:, :, None], header=img.header).save(out_path / f.name)
+
 
 def find_max_shape(slides_dict):
     # Independent function to find the max shape across slides, irrespective of zeroes
@@ -133,7 +134,7 @@ def find_max_shape(slides_dict):
     else:
         max_slide_shape = Image(slides_dict[all_slides[idx]]).shape
     return max_slide_shape
-    
+
 
 def zeropad(filename, length=3, save=False):
     '''Zero pad the slice number in a filename of format:

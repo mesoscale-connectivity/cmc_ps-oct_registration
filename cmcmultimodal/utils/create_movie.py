@@ -15,16 +15,25 @@ for axis in ['x', 'y', 'z']:
 
     image_size = {label: Image(image).shape[i] for i, label in enumerate(['x', 'y', 'z'])}
 
-    for sl in range(0,image_size[axis],round(image_size[axis]/200)):
-        sl_fill = f'{str(sl).zfill(4)}'   
+    for sl in range(0, image_size[axis], round(image_size[axis]/200)):
+        sl_fill = f'{str(sl).zfill(4)}'
         print(f"slice {sl_fill}")
         out = f'my_folder_{axis}/image_{sl_fill}.png'
         if axis == 'x':
-            cmd = f"fsleyes render -of {out}  --voxelLoc {sl} {image_size['y']//2} {image_size['z']//2} --hidey --hidez {rest_of_command}"
+            cmd = (
+                f"fsleyes render -of {out} --voxelLoc {sl} {image_size['y']//2} {image_size['z']//2} "
+                f"--hidey --hidez {rest_of_command}"
+            )
         elif axis == 'y':
-            cmd = f"fsleyes render -of {out}  --voxelLoc {image_size['x']//2} {sl} {image_size['z']//2} --hidex --hidez {rest_of_command}"
+            cmd = (
+                f"fsleyes render -of {out} --voxelLoc {image_size['x']//2} {sl} {image_size['z']//2} "
+                f"--hidex --hidez {rest_of_command}"
+            )
         elif axis == 'z':
-            cmd = f"fsleyes render -of {out}  --voxelLoc {image_size['x']//2} {image_size['y']//2} {sl} --hidex --hidey {rest_of_command}"
+            cmd = (
+                f"fsleyes render -of {out} --voxelLoc {image_size['x']//2} {image_size['y']//2} {sl} "
+                f"--hidex --hidey {rest_of_command}"
+            )
         os.system(cmd)
 
     import imageio
@@ -37,9 +46,7 @@ for axis in ['x', 'y', 'z']:
         images.append(imageio.imread(filename))
     imageio.mimsave(f'{Path(image).name}_{axis}.gif', images, loop=0)
 
-
     # cleanup stored images
     for filename in filenames:
         os.remove(filename)
     os.rmdir(f'my_folder_{axis}')
-
